@@ -1,0 +1,1011 @@
+---
+output:
+  html_document: 
+    self_contained: yes
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    number_sections: true
+    theme: cosmo
+params:
+  phenotype_name: "phenotype of interest"
+  color_code_yaml: NA
+  metaxcan_dir: NA
+  smultixcan_file: NA
+  smetaboxcan_file: NA
+  predict_db: NA
+  gene_metabolite_assoc_file: NA
+  summary_stat_file: NA
+  prefix: NA
+  gene_annotation: NA
+  mqtl_db: NA
+  metabo_pathways: NA
+  ld_blocks: NA
+  liftover_chain: NA
+  out_prefix: NA
+  rlib: NA
+  ntop: 20
+  sample_size: NA
+  h2: NA
+  output_dir: NA
+title: "`r paste0('MetaboXcan results for ', params$phenotype_name)`"
+---
+
+
+```{r setup, include=FALSE}
+suppressMessages(library(tidyverse))
+suppressMessages(library(tools))
+suppressMessages(library(ggplot2))
+suppressMessages(library(pander))
+suppressMessages(library(kableExtra))
+suppressMessages(library(ggfastman))
+suppressMessages(library(liftOver))
+suppressMessages(library(GenomicRanges))
+suppressMessages(library(reticulate))
+suppressMessages(library(cowplot))
+suppressMessages(library(knitr))
+suppressMessages(library(data.table))
+suppressMessages(library(patchwork))
+suppressMessages(library(RSQLite))
+suppressMessages(library(igraph))
+suppressMessages(library(visNetwork))
+suppressMessages(library(bacon))
+suppressMessages(library(openxlsx))
+suppressMessages(library(rprojroot))
+options(stringsAsFactors = FALSE)
+#use_python("/Users/festo/miniconda3/envs/bioinf/bin/python3")
+use_condaenv(condaenv = 'metaboxcan', required = TRUE)
+theme_set(theme_classic(base_size = 12))
+theme_set(theme_cowplot())
+panderOptions('table.split.table', Inf)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r parameters}
+metaxcan_dir = params$metaxcan_dir
+smultixcan_file = params$smultixcan_file
+smetaboxcan_file = params$smetaboxcan_file
+gene_metabolite_assoc_file = params$gene_metabolite_assoc_file
+phenotype_name = params$phenotype_name
+prefix_name = params$phenotype_name
+ntop = params$ntop
+sample_size = params$sample_size
+h2 = params$h2
+summary_stat_file = params$summary_stat_file
+annotation_file = params$gene_annotation
+metabolite_qtls_file = params$mqtl_db
+predict_db = params$predict_db
+pathways_file = params$metabo_pathways
+ldblocks_file = params$ld_blocks
+l_chain = params$liftover_chain
+out_dir = params$output_dir
+```
+
+
+# The OmicXcan Workflow
+This workflow is used to find the associations between genes, metabolite and complex traits
+
+```{r out-fig,dpi = 100, out.width="99%", fig.height=5}
+fig_path <- normalizePath(current_input())
+knitr::include_graphics(glue::glue("./metabo_workflow.png"))
+devtools::source_gist("38431b74c6c0bf90c12f")
+```
+
+```{r}
+# helpers
+# function to add cytoband genes
+addband2gene = function(df,geneid = "ensembl_gene_id") {
+  if(!exists("anno_gene")) {
+    ensembl <- biomaRt::useMart(biomart="ENSEMBL_MART_ENSEMBL",
+                                dataset="hsapiens_gene_ensembl")
+    anno_gene <- biomaRt::getBM(attributes = c("ensembl_gene_id","external_gene_name",
+                                            "chromosome_name","start_position",
+                                            "end_position","band", "gene_biotype"), mart=ensembl)
+  #print("defined anno_gene")
+  }
+  if(geneid != "ensembl_gene_id") names(df)[names(df)==geneid] = "ensembl_gene_id" ## this is an ugly workaround - need to find a way to use rename_ for this but don't know how to specify a string instead of name in rename(geneid = "ensembl_gene_id")
+  df = df %>% left_join(anno_gene, by=c( "ensembl_gene_id"))
+  if(geneid != "ensembl_gene_id") names(df)[names(df)=="ensembl_gene_id"] = geneid
+  df %>% mutate(cytoband = paste0(chromosome_name,band))
+}
+
+# define the liftover function
+my_liftover <- function(df,chain_file){
+  # load the chain
+  chain <- import.chain(chain_file)
+  # make the gr co ordinates
+  df <- df %>% 
+    dplyr::rename(seqname=chr,start=pos) %>% 
+    dplyr::mutate(end = start)
+  gr <- makeGRangesFromDataFrame(df, TRUE)
+  gr <- liftOver(gr, chain)
+  
+  new_df <- as.data.table(gr) %>%
+      dplyr::select(-c(group,group_name,width,strand)) %>% 
+      dplyr::rename(chr=seqnames,pos=start) %>% 
+      dplyr::mutate(chr = as.character(chr))
+  return(new_df)
+}
+
+# genome builds 
+# genes GTEx hg38
+# metabos hg38
+
+```
+
+
+```{r load_dir, echo=FALSE, warning=FALSE}
+# load the data silently
+# all gene tissue association files
+s_files <- list.files(path = metaxcan_dir, 
+                      pattern = glue::glue("{prefix_name}_GT_en_.*\\.csv$"), full.names = T)
+# multixcan results
+multixcan <- fread(smultixcan_file)
+multixcan <- multixcan %>% 
+  dplyr::mutate(t_i_best = str_remove(t_i_best, "en_"))
+# metaboxcan results
+metaboxcan <- fread(smetaboxcan_file) %>% dplyr::filter(!is.na(pvalue))
+# gene, metabo assoc file
+gene_metabolite_df <- fread(gene_metabolite_assoc_file)
+# metabolite annotation file
+paths_db <- fread(pathways_file)
+```
+
+
+# Manhattan plot for associated genes, metabolites and trait
+For each gene associated with `r phenotype_name`, eqtls are fetched from the GTEx portal and used to generate the manhattan plot. For each metabolite associated with `r phenotype_name` significantly (10^-3) associated mqtls are fetched and used to generate the manhattan plot. 
+```{r get_sig_genes, echo=FALSE}
+sig_gene_df <- multixcan %>% 
+  dplyr::filter(pvalue < 0.05/nrow(multixcan)) %>% 
+  dplyr::select(gene,gene_name,pvalue,z_mean,t_i_best) 
+
+if (nrow(sig_gene_df) == 0) {
+  print(paste0("NB: No Significant association at pvalue of ",0.05/nrow(multixcan),"(bonferroni sig). We are selecting the top 100 genes associations only."))
+  sig_gene_df <- multixcan %>% 
+    dplyr::select(gene,gene_name,pvalue,z_mean,t_i_best) %>% 
+    slice_min(pvalue, n = 100)
+}
+
+sig_genes <- sig_gene_df %>% 
+  dplyr::select(gene,gene_name,t_i_best,pvalue)
+```
+
+```{python get-eqtls_gtex,echo=FALSE}
+import requests
+import json
+import pandas as pd 
+
+to_fetch = r.sig_genes
+#to_fetch.head()
+gw_df = pd.DataFrame() 
+for index, row in to_fetch.iterrows():
+  #print(row['gene'], row['t_i_best'])
+  gencode = row['gene']
+  gene_name = row['gene_name']
+  tissue = row['t_i_best']
+  # portal changed from https://gtexportal.org/rest/v1/association/singleTissueEqtl
+  # doc: https://gtexportal.org/api/v2/docs
+  gene_eqtls = requests.get('https://gtexportal.org/api/v2/association/singleTissueEqtl', 
+                   params = {"gencodeId" : gencode,"tissueSiteDetailId" : tissue, 
+                   "datasetId" : "gtex_v8"})
+  data = json.loads(gene_eqtls.text)
+  if 'data' in data.keys():
+    myqtl = pd.json_normalize(data['data'])
+  else:
+    myqtl = pd.DataFrame()
+    #print(f"Cannot find the singleTissueEqtl from multixcan({tissue}) for {gene_name} gene")
+    
+  if myqtl.empty:
+    #print(f"Trying to get eqtls from all tissues as the best tissue from multixcan({tissue}) for {gene_name} gene has none")
+    gene_eqtls = requests.get('https://gtexportal.org/api/v2/association/singleTissueEqtl', 
+                   params = {"gencodeId" : gencode, "datasetId" : "gtex_v8"})
+    data = json.loads(gene_eqtls.text)
+    myqtl = pd.json_normalize(data['data'])
+  gw_df = gw_df.append(myqtl,ignore_index=True)
+
+# gw_df.head()
+```
+
+```{r format_eqtl,echo=FALSE}
+gw_eqtls <- py$gw_df %>% dplyr::select(snpId,chromosome,pos,pValue,geneSymbol) %>% 
+  dplyr::rename(rsid=snpId,chr=chromosome,pvalue=pValue) %>% 
+  mutate(rsid = sapply(rsid, toString)) %>% 
+  mutate(study_id="snp2gene")
+
+# Format and add colour for each gene
+gw_eqtls$color <- as.character(factor(gw_eqtls$geneSymbol, 
+                                      labels = 1:length(unique(gw_eqtls$geneSymbol))))
+
+```
+
+```{r get_sig_metabolites}
+sig_metab_df <- metaboxcan %>% 
+  dplyr::filter(pvalue < 0.05/nrow(metaboxcan)) %>% 
+  dplyr::select(gene,gene_name,pvalue,zscore,best_gwas_p) %>% 
+  dplyr::rename(metabolite_index=gene, Metabolite=gene_name) 
+
+if (nrow(sig_metab_df) == 0) {
+  print(paste0("NB: No Significant association at pvalue of ",0.05/nrow(metaboxcan),"(bonferroni sig). We are selecting the top 100 metabolite associations only."))
+  sig_metab_df <- metaboxcan %>% 
+    slice_min(pvalue, n = 100) %>% 
+    dplyr::select(gene,gene_name,pvalue,zscore,best_gwas_p) %>% 
+    dplyr::rename(metabolite_index=gene, Metabolite=gene_name) 
+}
+
+```
+
+```{r gw_mqtl, echo=FALSE}
+
+# get the metabolites qtls
+m_con <- dbConnect(RSQLite::SQLite(), metabolite_qtls_file)
+metabo_db <- tbl(m_con,"snp2metabo")
+gw_mqtls <- metabo_db %>% 
+  dplyr::filter(metabolite %in% local(sig_metab_df$metabolite_index)) %>% 
+  dplyr::select(metabolite,rsid,chr, pos, pvalue) %>% 
+  collect()
+dbDisconnect(m_con)
+
+#TODO metabolift_over
+# liftover coordinates
+if (! is.null(l_chain)) {
+  # check if we have snps
+  if(nrow(gw_mqtls != 0)) {
+    gw_mqtls <- my_liftover(gw_mqtls,l_chain) %>% 
+      mutate(study_id="snp2metabo")
+    # format and add colour
+    gw_mqtls$color <- as.character(factor(gw_mqtls$metabolite, 
+                                      labels = 1:length(unique(gw_mqtls$metabolite))))
+  }
+} else {
+  # format and add colour
+  gw_mqtls <- gw_mqtls %>% mutate(study_id="snp2metabo")
+  gw_mqtls$color <- as.character(factor(gw_mqtls$metabolite, 
+                                      labels = 1:length(unique(gw_mqtls$metabolite))))
+}
+
+```
+
+```{r summary_stats, echo=FALSE}
+# TODO Ensure the sumstats are hg38
+# Load the data
+con <- dbConnect(RSQLite::SQLite(), summary_stat_file)
+trait_db <- tbl(con,"summary_stats")
+summary_stats <- trait_db %>% 
+  dplyr::select(variant_id,chromosome, position, pvalue) %>% 
+  collect()
+dbDisconnect(con)
+
+gw_stats <- summary_stats %>% 
+  dplyr::rename(rsid=variant_id,pos=position,chr=chromosome) %>% 
+  mutate(study_id="snp2trait")
+```
+
+```{r all-plot, echo=FALSE, out.width='99%'}
+# gather ss. genes and metabo for a manhattan
+comb_df <- gw_eqtls %>% 
+  bind_rows(gw_mqtls ) %>% 
+  bind_rows(gw_stats) 
+
+comb_df$levs <- factor(comb_df$study_id,levels=c('snp2gene','snp2metabo', 'snp2trait'))
+
+comb_df %>% 
+  mutate(pvalue = ifelse(pvalue < 1e-30,1e-30,pvalue)) %>% 
+  fast_manhattan(., build = "hg38", speed = "fast", pointsize = 2.1, pixels = c(1000,500)) + 
+  geom_hline(yintercept = -log10(5e-08), linetype =2, color ="deeppink") + 
+  geom_hline(yintercept = -log10(1e-5), linetype =2, color ="grey") + 
+  facet_wrap(~levs, ncol = 1, scales = "free_y") +
+  ggplot2::theme_classic() +
+  theme(panel.grid.minor.y = element_blank(),
+        panel.grid.minor.x = element_blank())
+```
+
+# Comparison between individual tissue SPrediXcan and SMultiXcan
+Imputed gene expression was performed using `r length(s_files)` tissues using SPrediXcan. The individual tissue imputed expressions z-scores are compared against the meta-analyzed results mean z-scores from all tissues using SMultiXcan.
+The number of significant genes associated with the `r phenotype_name` from each tissue after bonferroni correction (O.O5 /number of imputed gene) is summarized below.
+```{r tissue_summary, echo=FALSE, warning=FALSE, eval=TRUE}
+summary_df <- data.frame(tissue=as.character(),sig_gene=as.numeric(),n_genes=as.numeric())
+for (infile in s_files){
+  spredixcan <- fread(infile)
+  out_name = str_remove(basename(file_path_sans_ext(infile)), glue::glue("{prefix_name}_GT_en_"))
+  #out_name = str_remove(basename(file_path_sans_ext(infile)), glue::glue("{prefix_name}_en_"))
+  s_df <- spredixcan %>%
+    filter(pvalue < 0.05/nrow(spredixcan))
+  
+  s_df <- data.frame(tissue=out_name,sig_gene=nrow(s_df),n_genes=nrow(spredixcan))
+  summary_df <- rbind(summary_df,s_df)
+}
+
+kbl(summary_df) %>%
+  kable_paper() %>%
+  scroll_box(height = "500px")
+```
+
+# Gene level results
+## Top `r ntop` genes associated with `r phenotype_name`
+The top gene associations are determined from the SMultiXcan results
+```{r top_gene_assoc, echo=FALSE}
+
+anno_gene <- fread("../data/annot_gene.txt")
+#Top associations
+corrected_gene_df <- sig_gene_df %>% 
+  slice_min(pvalue, n = ntop) %>% 
+  arrange(pvalue) %>% 
+  mutate(pvalue = format(pvalue, scientific= T, digits=2)) %>% 
+  mutate_if(is.numeric, format, digits=2) 
+
+cytoband_data <- corrected_gene_df %>% 
+  mutate(gene = gsub("\\..*","",gene)) %>% 
+  addband2gene(.,"gene") %>% 
+  dplyr::select(gene, gene_name, cytoband, pvalue,z_mean, t_i_best)
+
+kbl(cytoband_data) %>%
+  kable_paper() %>%
+  scroll_box(height = "400px")
+```
+
+The total number of significant genes associated with `r phenotype_name` is 
+`r nrow(sig_gene_df)`, _p_ = `r 0.05/nrow(multixcan)` (bonferroni corrected).
+
+## Manhattan plot of the multixcan results
+```{r genes_manhattan, echo=FALSE, out.width='99%'}
+# Load gene annotation file
+annot <- fread(annotation_file)
+gwas_data <- multixcan %>%
+  dplyr::select(gene,gene_name,pvalue) %>% 
+  inner_join(annot %>% dplyr::select(gene_id,chr,start,end), by = c("gene"="gene_id")) %>% 
+  dplyr::rename(pos=start) %>% mutate(chr= paste0("chr",chr)) %>% 
+  mutate(color = ifelse(pvalue < 0.05/nrow(multixcan),"red",NA))
+
+fast_manhattan(gwas_data, build='hg19', speed = "slow") +
+  geom_hline(yintercept = -log10(0.05/nrow(multixcan)), 
+             linetype =2, color ="blue") + # suggestive significance line
+  ggrepel::geom_text_repel(data = . %>% group_by(chr) %>% # ggrepel to avoid overplotting
+                             top_n(1, -pvalue) %>% # extract highest y values
+                             dplyr::slice(1) %>% # if there are ties, choose the first one
+                             dplyr::filter(pvalue <= 5e-08), # filter for significant ones 
+                             aes(label=gene_name), color =1) # add top rsid
+```
+
+## QQ plot plot of the multixcan results
+```{r genes_qqplot, echo=FALSE}
+fast_qq(pvalue = gwas_data$pvalue, speed = "slow", pointsize = 2)
+```
+
+## Loci with most gene significant associations
+Using the LD blocks we are going to find the distribution of the genes across the LD blocks defined by [Berisa and Pickrell](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4731402/) 
+for the `r nrow(sig_gene_df)` significant associations. We identify the lead gene in each of the loci and all the genes in that loci which are associated with `r phenotype_name`
+```{r get-loci, echo=FALSE}
+# load ldblocks
+ldblocks <- fread(ldblocks_file, data.table = F)
+
+## Add coords
+genes <- sig_gene_df %>% 
+  left_join(annot, by = c("gene" = "gene_id","gene_name" = "gene_name")) 
+
+# check if df exists and remove it
+if (exists('all_loci')) {rm(all_loci)}
+for (n in 1:nrow(genes)){
+  # extract genename, start and end
+  gene_name <- as.character(genes[n,"gene_name"])
+  gene_chr <- paste0("chr",genes[n,"chr"])
+  gene_start <- as.numeric(genes[n,"start"])
+  gene_end <- as.numeric(genes[n,"end"])
+  
+  locus <- ldblocks %>% 
+    filter(chr == gene_chr) %>%
+    filter(gene_start >= start & gene_end <= stop) %>% 
+    mutate(locus_name = paste0(chr,"_",start,"_",stop)) %>% 
+    dplyr::rename(locus_start=start,locus_end=stop) %>% 
+    mutate(gene_name =gene_name, gene_start=gene_start,gene_end=gene_end)
+  
+  # create a data frame with info
+  if (exists('all_loci') && is.data.frame(get('all_loci'))) {
+    all_loci <- rbind(all_loci,locus)
+  } else {
+    all_loci <- locus
+  }
+}
+
+# get top gene for each locus
+locus_top_gene <- all_loci %>%
+  left_join(genes %>% dplyr::select(gene_name,pvalue,z_mean), by = "gene_name") %>% 
+  dplyr::rename(top_gene=gene_name,locus_chr=chr) %>% 
+  group_by(locus_name) %>% mutate(n_genes = n()) %>% 
+  slice_min(pvalue, n = 1) %>% 
+  arrange(pvalue)
+
+# get all the genes in each locus
+all_genes_in_loci <- all_loci %>% group_by(locus_name) %>% 
+  summarize(genes_in_locus = paste(sort(unique(gene_name)),collapse=", "))
+
+# create a summary table
+locus_summary <- locus_top_gene %>% 
+  left_join(all_genes_in_loci, by = "locus_name") %>% 
+  dplyr::select(locus_name,top_gene,pvalue,z_mean,n_genes,genes_in_locus,locus_chr,locus_start,locus_end) %>% 
+  arrange(pvalue) %>% 
+  mutate(pvalue = format(pvalue, scientific= T, digits=2)) %>% 
+  mutate_if(is.numeric, format, digits=2)
+
+kbl(locus_summary) %>%
+  kable_paper() %>%
+  scroll_box(width = "100%", height = "400px")
+```
+
+## Distribution of loci by chromosome
+A quick look at which chromosome has the most loci associated with `r phenotype_name` based on the genes significantly associated with it.
+```{r loci_summary, echo=FALSE}
+chr_dist <- locus_summary %>% group_by(locus_chr) %>% mutate(loci_count = n()) %>%
+  dplyr::select(locus_chr,loci_count) %>% distinct() %>% arrange(desc(loci_count)) %>% 
+  left_join(locus_summary %>% group_by(locus_chr) %>% 
+              summarize(loci_in_chr = paste(sort(unique(locus_name)),collapse=", ")))
+
+kbl(chr_dist) %>%
+  kable_paper() %>%
+  scroll_box(width = "100%", height = "400px")
+```
+
+
+## Locus zoom plot of the top 5 significant loci
+The plots below show the locus zoom plots for the ld blocks that contain the top genes associated with `r phenotype_name`. The metabolite qtls associated with the top gene are also selected and the SNPs within the region are plotted. The pink line shows the genome-wide significance line (5e-08) while the grey one shows suggestive significance line (1e-5).
+
+```{r locus_plot, echo=FALSE}
+## add gene annotations
+gene_metabolite_df <- gene_metabolite_df %>% 
+  left_join(annot %>% dplyr::select(gene_id,gene_name), by = c("gene"="gene_id"))
+
+if(length(locus_summary$locus_name) >= 5){
+  pl_loci <- unique(locus_summary$locus_name)[1:5]
+} else {
+  pl_loci <- unique(locus_summary$locus_name)
+}
+out = NULL
+for (ld_locus in pl_loci){
+  out = c(out, knit_expand('./ld_locus_plot.Rmd'))
+}
+
+```
+`r paste(knit(text = out), collapse = '\n')`
+
+# Metabolite level results
+
+## Top `r ntop` metabolites associated with `r phenotype_name`
+The top metabolite associations are determined from the SMetaboXcan results. Significant metabolites are selected after bonferroni correction (pvalue set at 0.05/total_metabolites). The metabolites are then ordered in descending value of -log10(p).
+
+```{r top_metabo_assoc, echo=FALSE}
+p_metaboxcan <- metaboxcan
+# Top associations
+corrected_metab_df <- sig_metab_df %>% 
+  slice_min(pvalue, n = ntop) %>% 
+  arrange(pvalue) %>% 
+  mutate(pvalue = format(pvalue, scientific= T, digits=2)) %>% 
+  mutate_if(is.numeric, format, digits=2)
+
+kbl(corrected_metab_df) %>%
+  kable_paper() %>%
+  scroll_box(height = "400px")
+```
+
+
+The total number of significant metabolites associated with `r phenotype_name` is 
+`r nrow(sig_metab_df)`, _p_ < `r 0.05/nrow(metaboxcan)` (bonferroni corrected)
+
+## Metabolite summary by super and sub pathway
+```{r pathway_summary, echo=FALSE,warning=FALSE}
+# Acat function
+acat = function(pvec) 
+{
+  TT = sum( tan( (0.5 - pvec) *pi ) )
+  .5 - atan(TT / length(pvec)) / pi
+}
+
+pathway_metabo <- paths_db %>% 
+  dplyr::select(Metabolite.ID,COMP_ID,SUB_PATHWAY, SUPER_PATHWAY) %>% 
+  #dplyr::mutate(metabolite = ifelse(!is.na(COMP_ID),
+   #                                 glue::glue("met{COMP_ID}"),Metabolite.ID)) %>% 
+  dplyr::mutate(metabolite = Metabolite.ID) %>% 
+  dplyr::select(-c(Metabolite.ID,COMP_ID)) %>% 
+  right_join(p_metaboxcan %>% 
+               dplyr::select(gene,zscore, pvalue) %>% 
+               mutate(gene = gsub("\\..*","",gene)), 
+             by = c("metabolite" = "gene")) %>% 
+  mutate(SUB_PATHWAY = ifelse(SUB_PATHWAY == "","Undetermined",SUB_PATHWAY)) %>% 
+  mutate(SUPER_PATHWAY = ifelse(SUPER_PATHWAY == "","Undetermined**",SUPER_PATHWAY)) %>% 
+  mutate(SUB_PATHWAY = ifelse(SUB_PATHWAY == "UN","Undetermined",SUB_PATHWAY)) %>% 
+  mutate(SUPER_PATHWAY = ifelse(SUPER_PATHWAY == "UN","Undetermined**",SUPER_PATHWAY)) %>% 
+  mutate(SUB_PATHWAY = ifelse(is.na(SUB_PATHWAY),"Undetermined",SUB_PATHWAY)) %>% 
+  mutate(SUPER_PATHWAY = ifelse(is.na(SUPER_PATHWAY),"Undetermined**",SUPER_PATHWAY)) %>% 
+  dplyr::filter(SUB_PATHWAY != "Undetermined")
+  
+
+pathway_summary <- pathway_metabo %>% group_by(SUB_PATHWAY) %>% 
+  transmute(super_pathway = SUPER_PATHWAY, mean_zscore = mean(zscore), 
+            min_zscore = min(zscore),max_zscore = max(zscore),
+            acat_pvalue = acat(pvalue),
+            no_of_metabolites = n()) %>% distinct() %>% 
+  mutate_at(vars(mean_zscore, min_zscore, max_zscore), ~round(., 2)) %>% 
+  arrange(acat_pvalue) %>%  dplyr::rename(sub_pathway = SUB_PATHWAY) 
+
+kbl(pathway_summary %>% 
+      dplyr::mutate(acat_pvalue = format(acat_pvalue, scientific= T, digits=2))) %>%
+  kable_paper() %>%
+  scroll_box(height = "500px")
+```
+
+## Distribution of metabolite sub-pathway pvalues(acat)
+The black line indicates the bonferroni significance threshold.
+```{r pathway-qqunif, warning=FALSE, echo=FALSE}
+
+## source qqunif from github
+devtools::source_gist("38431b74c6c0bf90c12f")
+
+qqunif(pathway_summary$acat_pvalue)
+
+```
+
+## Ranked pathways association with `r phenotype_name`
+The pathways are coloured by the super pathway they belong to, the grey line represents 
+the bonferroni significance cut off. 
+```{r pathway_assoc, warning=FALSE, echo=FALSE, out.width='99%'}
+pathway_summary %>% head(30) %>% 
+   mutate(sub_pathway = str_replace(sub_pathway, "Metabolism","M")) %>% 
+   mutate(log10p=-log10(acat_pvalue)) %>% 
+    ggplot(aes(x = reorder(sub_pathway, log10p),log10p, fill = super_pathway) ) + 
+    geom_bar(stat="identity") +
+    geom_hline(yintercept = -log10(0.05/nrow(pathway_summary)),col='gray' ,size=1)  +
+    labs(x = "Sub pathway", fill = "Super Pathway") +
+    theme_minimal() +
+    theme(axis.text.y = element_text(size = 8,face = "plain"),
+          axis.title = element_text(size =12)) +
+    coord_flip() + 
+    ggtitle(glue::glue("pathway associations"))
+
+```
+
+## Top 20 pathways associated with `r phenotype_name`
+The pathways are colored based if they passed the bonferroni correction significance 
+set at `r 0.05/nrow(pathway_summary)`. The grey lines represent significance cut off 
+for the z-scores.
+```{r top-path-plot, echo=FALSE, warning=FALSE, out.width='99%'}
+## boxplot by subpathway
+zthres = abs( qnorm(0.05/nrow(pathway_metabo) / 2 ) ) ## BF sig Z score cutoff
+
+## plot top 20 pathways's metabolite zscores
+pathway_metabo %>% 
+  dplyr::rename(sub_pathway=SUB_PATHWAY,super_pathway=SUPER_PATHWAY) %>% 
+  inner_join(pathway_summary %>% 
+               mutate(bf_sig_path= acat_pvalue<0.05/nrow(pathway_summary)) %>%  
+               arrange(acat_pvalue) %>% 
+               head(20) %>% ## select top 20 by pathway p-value acat_pvalue
+               dplyr::select(sub_pathway,mean_zscore,acat_pvalue,bf_sig_path),
+             by=c("sub_pathway"="sub_pathway")) %>%
+  mutate(sub_pathway = str_replace(sub_pathway, "Metabolism","M")) %>% 
+  ggplot(aes(x=reorder(sub_pathway,-acat_pvalue), zscore)) + 
+  geom_violin() + 
+  geom_boxplot(alpha=0.8,aes(fill=bf_sig_path),width=0.2) + 
+  geom_jitter(alpha=0.6) + 
+  geom_hline(yintercept = zthres*c(-1,1),color='gray',size=1,alpha=0.5) +
+  theme_minimal() +
+  coord_flip() +
+  labs(y = "Zscore", x = "Sub pathway", fill = "Bonferroni Sig.")
+```
+
+
+```{r enrich-superpath, out.width='99%', fig.height=6.5, warning=FALSE}
+qqunif_pathway = 
+  function(p,BH=T,CI=T,mlog10_p_thres=30,...)
+  {
+    ## thresholded by default at 1e-30
+    p=na.omit(p)
+    nn = length(p)
+    xx =  -log10((1:nn)/(nn+1))
+    
+    p_thres = 10^{-mlog10_p_thres}
+    if( sum( p < p_thres) )
+    {
+      warning(paste("thresholding p to ",p_thres) )
+      p = pmax(p, p_thres)
+    }
+    plot( xx,  -sort(log10(p)),
+          xlab=expression(Expected~~-log[10](italic(p))),
+          ylab=expression(Observed~~-log[10](italic(p))),
+          cex.lab=0.9,mgp=c(2,1,0),
+          ... )
+    abline(0,1,col='gray')
+    if(BH)
+    {
+      abline(-log10(0.05),1, col='red',lty=1)
+      abline(-log10(0.10),1, col='orange',lty=2)
+      abline(-log10(0.25),1, col='yellow',lty=3)
+      legend('bottomright', c("FDR = 0.05","FDR = 0.10","FDR = 0.25"),
+             col=c('red','orange','yellow'),lty=1:3, cex=0.4)
+      abline(h=-log10(0.05/nn)) ## bonferroni
+    }
+    if(CI)
+    {
+      ## create the confidence intervals
+      c95 <- rep(0,nn)
+      c05 <- rep(0,nn)
+      
+      for(i in 1:nn)
+      {
+        c95[i] <- qbeta(0.95,i,nn-i+1)
+        c05[i] <- qbeta(0.05,i,nn-i+1)
+      }
+      
+      lines(xx,-log10(c95),col='gray')
+      lines(xx,-log10(c05),col='gray')
+    }
+  }
+
+## to add other qqplots on top of current plot
+
+qqpoints=
+function(p,BH=T,...)
+{
+  nn = length(p)
+  xx =  -log10((1:nn)/(nn+1))
+  points( xx,  -sort(log10(p)), ... )
+}
+
+## to use with dplyr's pipes
+
+qqunif.pipe = function(data,...){
+  pval = data$pval
+  qqunif(pval,...)
+}
+
+qqunif.compare = function(pvec1,pvec2,pthres=NULL,...)
+{
+  pvec1 = na.omit(pvec1)
+  pvec2 = na.omit(pvec2)
+  if(!is.null(pthres)) {pvec1 = pmax(pvec1,pthres); pvec2 = pmax(pvec2,pthres)}
+  qqunif(pvec1,...)
+  qqpoints(pvec2,col='blue',pch='+')
+  abline(h=-log10(0.05/length(pvec2)),col='blue',lw=2)
+}
+
+myqqsubpath = function(tempo,pathname,exact.match=FALSE) 
+{
+  ## tempo should be a data frame with pvalue and subpathway columns
+  tempo %>% .[["pvalue"]] %>% qqunif_pathway()
+  if(exact.match)
+  {
+    tempo2 = tempo %>% 
+      filter(tolower(pathname)==tolower(subpathway) | 
+               tolower(pathname)==tolower(superpathway)) 
+  } else
+  {
+    tempo2 = tempo %>% 
+      filter(grepl(pathname, subpathway, ignore.case = TRUE) | 
+               grepl(pathname, superpathway, ignore.case = TRUE)) 
+  }
+  nsup=length(unique(tempo2$superpathway))
+  nsub=length(unique(tempo2$subpathway))
+  title(glue::glue("{pathname} (nsup= {nsup}; nsub={nsub})"),cex.main = 0.8)
+  if(nrow(tempo2)>0) tempo2 %>% .[["pvalue"]] %>% qqpoints(pch='+', col=3) else
+    warning("super/subpathway not found")
+}
+
+```
+
+## Sub pathways enrichment plots
+A plot of the top 9 sub pathways to determine which ones are enriched
+```{r enrich-subpath, out.width='99%', fig.height=6, warning=FALSE}
+#sub pathway
+par(mfrow=c(3,3))
+for(metabo in unique(pathway_summary$sub_pathway)[1:9]){
+  metabo <- str_replace(metabo, "Metabolism","M")
+  pathway_metabo %>% 
+    dplyr::rename(subpathway=SUB_PATHWAY,superpathway=SUPER_PATHWAY) %>% 
+    mutate(subpathway = str_replace(subpathway, "Metabolism","M")) %>%
+    myqqsubpath(. ,metabo,exact.match = TRUE)
+  
+}
+```
+
+
+## Manhattan plot for the top 5 metabolites associated with `r phenotype_name`
+A GWAS plot for each of the above metabolites associated with with the trait.The pink line shows the genome-wide significance line (5e-08) while the grey one shows suggestive significance line (1e-5).
+```{r metabo-gwas_plots, echo=FALSE}
+
+if(length(corrected_metab_df$metabolite_index) >= 5){
+  pl_metabo <- corrected_metab_df$metabolite_index[1:5]
+} else {
+  pl_metabo <- corrected_metab_df$metabolite_index
+}
+
+for (metab in pl_metabo){
+  # get the metname
+  met_name <- corrected_metab_df[corrected_metab_df$metabolite_index == metab,]$Metabolite
+  # subset the data
+  m_con <- dbConnect(RSQLite::SQLite(), metabolite_qtls_file)
+  metabo_db <- tbl(m_con,"snp2metabo")
+  fine_db <- tbl(m_con, "finemapping")
+  all_mqtls <- metabo_db %>% 
+    dplyr::filter(metabolite %in% local(metab)) %>% 
+    dplyr::select(metabolite,rsid,chr, pos, pvalue) %>% 
+    mutate(pvalue = ifelse(pvalue < 1e-30,1e-30,pvalue)) %>% 
+    collect()
+  fine_mqtls <- fine_db %>% 
+    dplyr::filter(metabolite %in% local(metab)) %>% 
+    collect()
+  dbDisconnect(m_con)
+  
+  if (nrow(all_mqtls) >= 1) {
+    # liftover genome co ordinates
+    if (! is.null(l_chain)) {
+      all_mqtls <- my_liftover(all_mqtls,l_chain)
+    }
+    mqtls <- all_mqtls %>% 
+      mutate(chr = as.character(chr)) %>% 
+      mutate(study_id="mqtl")
+    # add colour to the fine mapped snps
+    mqtls <- mqtls %>% left_join(fine_mqtls, by = c("metabolite", "rsid")) %>% 
+      mutate(color = ifelse(! is.na(cs_cluster),"red", NA)) 
+    
+  } else {
+    mqtls <- data.frame(chr = paste0("chr", 1), pos = 1200000,
+                        pvalue= 0.01, metabolite = "none", cs_cluster = 1,rsid ="rs00")
+  }
+  
+  # manhattan plot 
+  p2 <- mqtls %>% 
+  fast_manhattan(., build = "hg38", speed = "slow") + 
+  geom_hline(yintercept = -log10(5e-08), linetype =2, color ="deeppink") + 
+  geom_hline(yintercept = -log10(1e-5), linetype =2, color ="grey") + 
+  ggrepel::geom_text_repel(data = . %>% 
+                             dplyr::filter(! is.na(cs_cluster)),
+                             aes(label=rsid), color =1, size =2,max.overlaps = Inf) +
+  labs(title = paste0(met_name," gwas plot")) +
+  theme(panel.grid.minor.y = element_blank(),
+        plot.title = element_text(hjust = 0.5, face = "bold.italic"))
+  print(p2)
+}
+
+```
+
+
+# Network analysis and candidate clusters
+```{r network, echo=FALSE}
+source("./net.R")
+
+m.network <- fread("/gpfs/data/im-lab/nas40t2/festus/metabolomics/pipeline/data/main-network-small.tsv")
+gene_info <- fread("/gpfs/data/im-lab/nas40t2/festus/metabolomics/pipeline/data/gene-info.tsv")
+met_info <- paths_db
+
+# get scores table
+net.scores <- metaboxcan %>% dplyr::select(gene,zscore,pvalue) %>% 
+  mutate(gene = str_replace(gene,"met", "M")) %>% 
+  mutate(b_sig =ifelse(pvalue < 0.05/nrow(.),"yes","no")) %>% 
+  bind_rows(multixcan %>% dplyr::select(gene,z_mean,pvalue) %>%
+              dplyr::rename(zscore = z_mean) %>% 
+              mutate(gene = gsub("\\..*","",gene)) %>% 
+              mutate(b_sig =ifelse(pvalue < 0.05/nrow(.),"yes","no"))) %>% 
+  distinct()
+
+# select significant nodes
+ss <- top_selector(net.scores,m.network)
+
+# run analysis
+lc <- get_community(ss,m.network)
+n.edges <- plt_edges(ss,m.network)
+n.nodes <- plt_nodes(lc,net.scores,gene_info,met_info)
+nn = n.nodes %>% filter((id %in% n.edges$from) | (id %in% n.edges$to)) %>%
+  group_by(id) %>% dplyr::slice(1) %>% ungroup()
+visNetwork(nn, n.edges) %>%
+  visNodes(shadow = list(enabled = T, size = 5, x = 5, y =5),
+           borderWidthSelected =5) %>%
+  visOptions(highlightNearest = list(enabled =TRUE, degree = 1),
+             nodesIdSelection = TRUE, selectedBy = "group") %>%
+  visPhysics( solver = "barnesHut",barnesHut = list(gravity = -5000) ) %>%
+  visIgraphLayout(randomSeed = 123,type = "full",
+                  layout = "layout_with_kk")
+
+## Save network
+network <- visNetwork(nn, n.edges, width = "100%",height = 1200) %>%
+  visNodes(shadow = list(enabled = T, size = 5, x = 5, y =5),
+           borderWidthSelected = 5) %>%
+  visOptions(highlightNearest = list(enabled =TRUE, degree = 1),
+             nodesIdSelection = TRUE, selectedBy = "group") %>%
+  visPhysics( solver = "barnesHut",barnesHut = list(gravity = -5000) ) %>%
+  visIgraphLayout(randomSeed = 123,type = "full",
+                  layout = "layout_with_kk")
+
+n.dir = glue::glue("{out_dir}/nets")
+if(!dir.exists(n.dir)){ dir.create(n.dir)}
+visSave(network, file = glue::glue("{n.dir}/{phenotype_name}_network.html"))
+
+```
+
+## Clusters ranked by their pvalues
+```{r clusters, echo=FALSE}
+# tables
+clusters <- get_clusters(n.nodes)
+#main_neighbors <- get_neighbors(m.network,ss,1)
+kbl(clusters) %>%
+  kable_paper() %>%
+  scroll_box(width = "100%", height = "500px")
+```
+
+
+## Locus zoom plot for gene with highest activity of the activity to trait and metabolites
+Get a gene which has association with both the trait and the metabolites. Find all the metabolites associated with the gene and gene rate a locus zoom plot for the ld region where the gene is located.
+
+```{r best-overlap}
+## get best overlap
+all_gene_assoc <- gene_metabolite_df %>% 
+  dplyr::select(gene,Metabolite,pvalue) %>% 
+  dplyr::filter(gene %in% sig_gene_df$gene) %>%
+  left_join(sig_gene_df %>% dplyr::select(gene,gene_name,pvalue,t_i_best) %>%
+              dplyr::rename(gene_trait_pval =pvalue),by = "gene")
+
+all_met_assoc <- gene_metabolite_df %>% 
+  dplyr::select(gene,Metabolite,pvalue) %>%  
+  dplyr::filter(Metabolite %in% sig_metab_df$Metabolite) %>% 
+  left_join(sig_metab_df %>% dplyr::select(Metabolite, pvalue) %>%
+              dplyr::rename(met_trait_pval = pvalue), by = "Metabolite") 
+  
+
+best_overlap <- all_gene_assoc %>% 
+  inner_join(all_met_assoc) %>% 
+  dplyr::rename(gene_met_pval = pvalue) %>% 
+  mutate(gene_met_pval = -log10(gene_met_pval)) %>%
+  mutate(gene_trait_pval = -log10(gene_trait_pval)) %>%
+  mutate(met_trait_pval = -log10(met_trait_pval)) %>%
+  mutate_if(is.numeric, format, digits=4)
+
+
+if (nrow(best_overlap) == 0) {
+  #print("Best overlap between genes and metabolites not detected. No plot")
+} else {
+  #best_eqtls <- py$best_df
+  if(exists("best_eqtls") && is.data.frame(get('best_eqtls')) && nrow(best_eqtls) > 0){
+    best_eqtls <- best_eqtls %>% 
+      dplyr::select(snpId,chromosome,pos,pValue,geneSymbol) %>% 
+      dplyr::rename(rsid=snpId,chr=chromosome,pvalue=pValue) %>% 
+      mutate(rsid = sapply(rsid, toString)) %>% 
+      mutate(pvalue = ifelse(pvalue < 1e-30,1e-30,pvalue)) %>%
+      dplyr::distinct() %>% 
+      mutate(study_id="snp2gene")
+  } else {
+    best_eqtls <- data.frame(chr = paste0("chr",1), pos = 1200000,
+                        pvalue= 0.01, geneSymbol = "none",study_id="snp2gene")
+  }
+  
+  best_overlap <- best_overlap %>% 
+    left_join(gene_metabolite_df %>% dplyr::select(Metabolite, metabolite_index), 
+              by = c("Metabolite"),relationship = "many-to-many") %>% 
+    dplyr::distinct()
+  
+  # collate the data
+  m_con <- dbConnect(RSQLite::SQLite(), metabolite_qtls_file)
+  metabo_db <- tbl(m_con,"snp2metabo")
+  best_mqtls <- metabo_db %>% 
+    dplyr::filter(metabolite %in% local(best_overlap$metabolite_index)) %>% 
+    dplyr::select(metabolite,rsid,chr, pos, pvalue) %>% 
+    collect()
+  dbDisconnect(m_con)
+  
+  
+  if (nrow(best_mqtls) >= 1) {
+    # liftover coordinates
+    if (! is.null(l_chain)) {
+      best_mqtls <- my_liftover(best_mqtls,l_chain)
+    }
+    best_mqtls <- best_mqtls %>% 
+      mutate(chr = as.character(chr)) %>% 
+      mutate(study_id="snp2metabo")
+  } else {
+    best_mqtls <- data.frame(chr = paste0("chr",sel.chr), pos = locus_data$locus_start,
+                        pvalue= 0.01, metabolite = "none",study_id="snp2metabo")
+  }
+  
+  best_eqtls$color <- as.character(factor(best_eqtls$geneSymbol, 
+                                        labels = 1:length(unique(best_eqtls$geneSymbol))))
+  best_mqtls$color <- as.character(factor(best_mqtls$metabolite, 
+                                        labels = 1:length(unique(best_mqtls$metabolite))))
+}
+```
+
+
+```{r activity_locus_info}
+# select the gene
+ff <- best_overlap %>% group_by(gene_name) %>%  count() %>% 
+  dplyr::rename(tot=n) %>% arrange(desc(tot)) 
+
+# get information
+best_gene = ff[1,"gene_name"]$gene_name
+b_annot <- annot[annot$gene_name ==best_gene,]
+
+all_loci <- ldblocks %>% 
+    dplyr::filter(chr == paste0("chr",b_annot$chr)) %>%
+    dplyr::filter(b_annot$start >= start & b_annot$end <= stop) %>% 
+    dplyr::mutate(locus_name = paste0(chr,"_",start,"_",stop)) %>% 
+    dplyr::rename(locus_start=start,locus_end=stop) %>% 
+    dplyr::mutate(gene_name =b_annot$gene_name, gene_id = b_annot$gene_id,
+                  gene_start=b_annot$start,gene_end=b_annot$end)
+
+if(nrow(all_loci) == 0){
+  start_loci <- ldblocks %>% 
+      dplyr::filter(chr == paste0("chr",b_annot$chr)) %>%
+      dplyr::filter(b_annot$start >= start & b_annot$start <= stop) %>% 
+      dplyr::mutate(locus_one = paste0(chr,"_",start,"_",stop)) %>% 
+      dplyr::rename(locus_start=start) %>% dplyr::select(-c(stop))
+  end_loci <- ldblocks %>% 
+      dplyr::filter(chr == paste0("chr",b_annot$chr)) %>%  
+      dplyr::filter(b_annot$end >= start & b_annot$end <= stop) %>% 
+      dplyr::mutate(locus_two = paste0(chr,"_",start,"_",stop)) %>% 
+      dplyr::rename(locus_end=stop) %>% dplyr::select(-c(start)) %>% 
+      dplyr::mutate(gene_name =b_annot$gene_name, gene_id = b_annot$gene_id,
+                  gene_start=b_annot$start,gene_end=b_annot$end)
+  all_loci = start_loci %>% 
+    inner_join(end_loci, by = "chr") %>% 
+    mutate(locus_name = paste0(locus_one, "_and_", locus_two)) %>% 
+    dplyr::select(-c(locus_one,locus_two))
+  
+  if (nrow(all_loci) == 1){
+    print("This gene overlaps two ld regions")
+  }
+}
+
+```
+
+```{r activity_locus_plot, echo=FALSE}
+out = "No plot generated"
+if(nrow(all_loci) == 1){
+  out = NULL
+  out = c(out, knit_expand('./locus_activity.Rmd'))
+} else {
+  print("Couldn't determine the gene/locus with the most activity")
+}
+```
+`r paste(knit(text = out), collapse = '\n')`
+
+```{r save-res,message=FALSE,warning=FALSE,results=FALSE}
+
+o.dir=glue::glue("{out_dir}/summaries")
+#o.dir=glue::glue("/Users/festo/Documents/HakyIm/metsim-phi/summaries")
+if(!dir.exists(o.dir)){ dir.create(o.dir)}
+phenotype_name = str_replace(phenotype_name, " ", "_")
+of=glue::glue("{o.dir}/{phenotype_name}_summary.xlsx")
+if(file.exists(of)){file.remove(of)}
+
+OUT <- createWorkbook()
+
+# smultixcan
+sname <- "multixcan"
+addWorksheet(OUT, sname)
+writeData(OUT, sheet = sname, x = multixcan)
+
+# smultixcan
+metaboxcan <- metaboxcan %>% 
+  dplyr::rename(metabo_id = gene, metabolite = gene_name) %>% 
+  dplyr::select(-c(pvalue,zscore)) %>% 
+  inner_join(met_info %>% dplyr::select(Metabolite.ID,HMDB,Biochemical.name),
+             by = c("metabolite" = "Metabolite.ID")) %>% 
+  dplyr::relocate(HMDB, .after = metabolite) %>% 
+  dplyr::relocate(Biochemical.name, .after = HMDB) %>% 
+  dplyr::select(-c(metabo_id, effect_size, var_g, pred_perf_r2,pred_perf_pval,
+            pred_perf_qval,n_snps_in_cov))
+  
+sname <- "metaboxcan"
+addWorksheet(OUT, sname)
+writeData(OUT, sheet = sname, x = metaboxcan)
+
+# pathways
+sname <- "pathways"
+addWorksheet(OUT, sname)
+writeData(OUT, sheet = sname, x = pathway_summary)
+
+# smultixcan
+sname <- "clusters"
+addWorksheet(OUT, sname)
+writeData(OUT, sheet = sname, x = clusters)
+
+
+saveWorkbook(OUT,of)
+
+
+```
+
