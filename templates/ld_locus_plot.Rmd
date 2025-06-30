@@ -1,0 +1,217 @@
+
+```{r {{ld_locus}}_fill, echo=FALSE}
+ld_locus <- '{{ld_locus}}'
+# get individual locus data
+locus_data <- all_loci %>%
+  left_join(genes %>% dplyr::select(gene_name,pvalue,z_mean,gene_type), by = "gene_name") %>%
+  dplyr::filter(locus_name == ld_locus)
+
+# get the chr
+sel.chr = unique(locus_data$chr)
+sel.chr = ifelse(is.numeric(sel.chr),sel.chr,as.numeric(str_remove(sel.chr,"chr")))
+# transform coordinates
+locus_data <- transform(locus_data,locus_end = locus_end/1e6)
+locus_data <- transform(locus_data,locus_start = locus_start/1e6)
+locus_data <- transform(locus_data,gene_start = gene_start/1e6)
+locus_data <- transform(locus_data,gene_end = gene_end/1e6)
+# generate the bottom legend
+p4 <- ggplot(data = locus_data) + 
+      geom_linerange(aes(x = -log10(pvalue), ymin = gene_start, ymax = gene_end,
+                         colour = gene_type, group = gene_type)) +
+  coord_flip() +
+  ggplot2::scale_x_continuous(expand=c(0.01,0), limits = c(0,max(-log10(locus_data$pvalue))+1),
+                              name=expression(-log[10](italic(p)))) +
+  ylab(paste0("chr",sel.chr,": bp position (Mb)")) + 
+  #xlim(0,max(-log10(locus_data$pvalue))+1) +
+  ylim(unique(locus_data$locus_start),unique(locus_data$locus_end)) +
+  geom_text(aes(x = -log10(pvalue), y = gene_start, label = gene_name, colour = gene_type),
+            fontface = 2, alpha = I(0.7), hjust = "right", size= 2) +
+  ggplot2::theme_classic() +
+  labs(color = "Gene Biotype", title = paste0("genes in locus ", ld_locus)) +
+  theme(legend.position="bottom", 
+        panel.grid.major.y = element_blank(),
+        plot.title = element_text(hjust = 0.5, face = "italic"))
+
+# select gene names to use for fetching eqtls
+to_fetch <- sig_gene_df %>% 
+  dplyr::select(gene,gene_name,t_i_best,pvalue) %>% 
+  dplyr::filter(gene_name %in% locus_data$gene_name) %>% 
+  arrange(pvalue) %>% 
+  slice_min(pvalue, n = 1) # only fetch eqtls for top gene
+
+top_gene_name <- to_fetch$gene_name
+```
+
+```{python {{ld_locus}}_gtex, echo=FALSE}
+import requests
+import json
+import pandas as pd 
+
+to_fetch = r.to_fetch
+df = pd.DataFrame() 
+for index, row in to_fetch.iterrows():
+  #print(row['gene'], row['t_i_best'])
+  gencode = row['gene']
+  gene_name = row['gene_name']
+  tissue = row['t_i_best']
+  gene_eqtls = requests.get('https://gtexportal.org/rest/v1/association/singleTissueEqtl', 
+                   params = {"gencodeId" : gencode,"tissueSiteDetailId" : tissue, "datasetId" : "gtex_v8"})
+  data = json.loads(gene_eqtls.text)
+  myqtl = pd.json_normalize(data['singleTissueEqtl'])
+  if myqtl.empty:
+    print(f"Trying to get eqtls from all tissues as the best tissue from multixcan({tissue}) for {gene_name} gene has none")
+    gene_eqtls = requests.get('https://gtexportal.org/rest/v1/association/singleTissueEqtl', 
+                   params = {"gencodeId" : gencode, "datasetId" : "gtex_v8"})
+    data = json.loads(gene_eqtls.text)
+    myqtl = pd.json_normalize(data['singleTissueEqtl'])
+  df = df.append(myqtl,ignore_index=True)
+
+#df.head()
+```
+
+```{r {{ld_locus}}_eqplt, echo=FALSE}
+eqtls <- py$df 
+
+if(exists("eqtls") && is.data.frame(get('eqtls')) && nrow(eqtls) > 0){
+  eqtls <-eqtls %>% dplyr::select(snpId,chromosome,pos,pValue,geneSymbol) %>% 
+    dplyr::rename(rsid=snpId,chr=chromosome,pvalue=pValue) %>% 
+    mutate(rsid = sapply(rsid, toString)) %>% 
+    mutate(pvalue = ifelse(pvalue < 1e-30,1e-30,pvalue)) %>% 
+    mutate(study_id="eqtl")
+} else {
+  eqtls <- data.frame(chr = paste0("chr",sel.chr), pos = locus_data$locus_start,
+                      pvalue= 0.01, geneSymbol = "none")
+}
+
+eqtls <- transform(eqtls,pos = pos/1e6)
+p1 <- eqtls %>% 
+  fast_manhattan(., build = "hg38", speed = "slow", pointsize = 2.5, pixels = c(1000,500)) + 
+  geom_hline(yintercept = -log10(5e-08), linetype =2, color ="deeppink") + 
+  geom_hline(yintercept = -log10(1e-5), linetype =2, color ="grey") + 
+  #theme_bw(base_size = 16) + 
+  scale_y_continuous(limits = c(0,35),name=expression(-log[10](italic(p)))) +
+  xlim(unique(locus_data$locus_start),unique(locus_data$locus_end)) +
+  labs(title = paste0(top_gene_name, " gene (snp2gene)")) +
+  theme(panel.grid.minor.y = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        plot.title = element_text(hjust = 0.5, face = "italic"))
+```
+
+```{r {{ld_locus}}_mqplt, echo=FALSE}
+sel.chr = unique(locus_data$chr)
+sel.chr = ifelse(is.numeric(sel.chr),sel.chr,as.numeric(str_remove(sel.chr,"chr")))
+# get all the genes in the locus
+met_genes <- gene_metabolite_df %>% 
+  dplyr::select(gene_name,metabolite_index,Metabolite,pvalue) %>% 
+  dplyr::filter(gene_name %in% locus_data$gene_name)
+
+# get top associated metabolite for each gene
+sig_met_gene <- met_genes %>% 
+  dplyr::filter(gene_name %in% top_gene_name)  # get all the metabolites associated
+  #group_by(gene_name) %>% # select one metabolite for each the genes in ld block
+  #dplyr::slice_min(pvalue, n = 1)
+
+# collate the data
+m_con <- dbConnect(RSQLite::SQLite(), metabolite_qtls_file)
+metabo_db <- tbl(m_con,"snp2metabo")
+all_mqtls <- metabo_db %>% 
+  dplyr::filter(metabolite %in% local(unique(sig_met_gene$metabolite_index))) %>% 
+  dplyr::select(metabolite,rsid,chr, pos, pvalue) %>% 
+  collect()
+dbDisconnect(m_con)
+
+if (nrow(all_mqtls) >= 1) {
+  # liftover coordinates
+  if (! is.null(l_chain)) {
+    all_mqtls <- my_liftover(all_mqtls,l_chain)
+  }
+  mqtls <- all_mqtls %>% 
+    mutate(chr = as.character(chr)) %>%
+    mutate(pvalue = ifelse(pvalue < 1e-30,1e-30,pvalue)) %>% 
+    mutate(study_id="mqtl")
+} else {
+  mqtls <- data.frame(chr = paste0("chr",sel.chr), pos = locus_data$locus_start,
+                      pvalue= 0.01, metabolite = "none")
+}
+mqtls$color <- as.character(factor(mqtls$metabolite, labels = 1:length(unique(mqtls$metabolite))))
+mqtls <- transform(mqtls,pos = pos/1e6)
+# use data to do a plot 
+p2 <- mqtls %>% 
+  fast_manhattan(., build = "hg38", speed = "slow", pointsize = 2.5, pixels = c(1000,500)) + 
+  geom_hline(yintercept = -log10(5e-08), linetype =2, color ="deeppink") + 
+  geom_hline(yintercept = -log10(1e-5), linetype =2, color ="grey") + 
+  #theme_bw(base_size = 16) + 
+  scale_y_continuous(limits = c(0,35),name=expression(-log[10](italic(p)))) +
+  xlim(unique(locus_data$locus_start),unique(locus_data$locus_end)) +
+  labs(title = paste0(length(unique(all_mqtls$metabolite)),
+                      " metabolite associated with ", top_gene_name, " (snp2metabo)")) +
+  theme(panel.grid.minor.y = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        plot.title = element_text(hjust = 0.5, face = "italic"))
+```
+
+
+```{r {{ld_locus}}_ssplt,echo=FALSE, warning=FALSE}
+sel.chr = unique(locus_data$chr)
+chrom_subset=paste0("chr",ifelse(is.numeric(sel.chr),sel.chr,str_remove(sel.chr,"chr")))
+# read data from a txt file
+#stat_file <- glue::glue("{chrom_subset}.new.txt")
+#summary_stats <- fread(stat_file, data.table = F)
+#METABDB = "/Volumes/im-lab/nas40t2/festus/metabolomics/guardian/MetaboXcan/pipeline"
+
+# using a database
+#con <- dbConnect(RSQLite::SQLite(), glue::glue("{METABDB}/imputed_pgc.scz2.db") )
+#summary_stats = dbGetQuery(con, 'select * from summary_stats where "chromosome" == :chr', 
+#  params = list(chr = sel.chr))
+con <- dbConnect(RSQLite::SQLite(), summary_stat_file)
+trait_db <- tbl(con,"summary_stats")
+
+summary_stats <- trait_db %>% 
+  dplyr::select(variant_id,chromosome, position, pvalue) %>% 
+  dplyr::filter(chromosome == sel.chr) %>% collect()
+
+dbDisconnect(con)
+
+if (exists('summary_stats') && nrow(summary_stats) >= 1) {
+  stats <- summary_stats %>% 
+    dplyr::select(variant_id,chromosome, position, pvalue) %>% 
+    dplyr::rename(rsid=variant_id,pos=position,chr=chromosome) %>% 
+    mutate(pvalue = ifelse(pvalue < 1e-30,1e-30,pvalue)) %>% 
+    mutate(study_id="trait")
+} else {
+  stats <- data.frame(chr = paste0("chr",sel.chr), pos = locus_data$locus_start,
+                      pvalue= 0.01, metabolite = "none", study_id="trait")
+}
+
+stats <- transform(stats,pos = pos/1e6)
+
+p3 <- stats %>% 
+  fast_manhattan(., build = "hg38", speed = "slow", pointsize = 2.5, pixels = c(1000,500)) + 
+  geom_hline(yintercept = -log10(5e-08), linetype =2, color ="deeppink") + 
+  geom_hline(yintercept = -log10(1e-5), linetype =2, color ="grey") + 
+  #theme_bw(base_size = 16) + 
+  scale_y_continuous(limits = c(0,35),name=expression(-log[10](italic(p)))) +
+  xlim(unique(locus_data$locus_start),unique(locus_data$locus_end)) +
+  labs(title = paste0(phenotype_name, " gwas")) +
+  theme(panel.grid.minor.y = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        plot.title = element_text(hjust = 0.5, face = "italic"))
+```
+
+```{r {{ld_locus}}_allplt,echo=FALSE, warning=FALSE,out.width='99%', fig.height=7.5}
+##, fig.cap ="LD block {{ld_locus}}"
+# patch the plots together
+p1b <- p1 + xlim(unique(locus_data$locus_start),unique(locus_data$locus_end))
+
+p1 + p2 + p3 + p4 + plot_layout(ncol = 1,  nrow = 4,heights = unit(c(2.5,2.5,2.5,4), c('cm', 'cm'))) +
+  plot_annotation(paste0('Locus zoomplot for LD region ', ld_locus))
+```

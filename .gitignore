@@ -1,0 +1,6 @@
+# ignore .slurm files
+*.slurm
+
+# ignore logs and data folder
+logs/  
+/data/

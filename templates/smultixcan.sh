@@ -1,0 +1,18 @@
+python ${params.MetaXcan}/software/SMulTiXcan.py \
+  --models_folder . \
+  --models_name_pattern "${params.models_name_pattern}" \
+  --snp_covariance ${params.snp_covariance} \
+  --metaxcan_folder . \
+  --metaxcan_filter "${metax_filt}" \
+  --metaxcan_file_name_parse_pattern "${metax_parse}" \
+  --gwas_file ${gwas_file} \
+  --snp_column variant_id \
+  --effect_allele_column effect_allele \
+  --non_effect_allele_column non_effect_allele \
+  --zscore_column zscore \
+  --keep_non_rsid \
+  --model_db_snp_key rsid \
+  --cutoff_condition_number 30 \
+  --verbosity 7 \
+  --throw \
+  --output ${mgene_trait}
