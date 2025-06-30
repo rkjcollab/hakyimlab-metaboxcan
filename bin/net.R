@@ -1,3 +1,4 @@
+#! /usr/bin/env Rscript
 # functions
 acat = function(pvec)
 {

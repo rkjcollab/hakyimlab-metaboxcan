@@ -2,6 +2,7 @@
 
 process impute_gene {
     tag "PrediXcan"
+    label "process_medium"
     publishDir path: { params.keepIntermediate ? "${params.outdir}/predicted_gene" : params.outdir },
                saveAs: { params.keepIntermediate ? it : null }, mode: 'move'
 
@@ -33,9 +34,9 @@ process impute_gene {
 }
 
 
-
-process spredixcan {
-  tag "individual tissue association"
+process spredixcan_raw {
+  tag "individual tissue association raw"
+  label "process_medium"
   publishDir path: { params.keepIntermediate ? "${params.outdir}/gene-trait" : params.outdir },
              saveAs: { params.keepIntermediate ? it : null }, mode: 'copy'
 
@@ -46,15 +47,12 @@ process spredixcan {
   output:
   path(outname), emit: outname
   path(db), emit: db
-  path "spred/*", emit: gather_spred
-
 
   script:
   outname = gwas_name + "_GT_" + tissue + ".csv"
   db = db_cov[0]
   covs = db_cov[1]
   
-  //template 'spredixcan.sh'
   """
   python ${params.MetaXcan}/software/SPrediXcan.py \
   --gwas_file ${gwas_file} \
@@ -69,14 +67,52 @@ process spredixcan {
   --model_db_snp_key rsid \
   --throw \
   --output_file ${outname}
+  """
+}
 
-  mkdir -p spred
-  cp $outname spred/.
+process spredixcan_adj {
+  tag "individual tissue association adj"
+  label "process_medium"
+  publishDir path: { params.keepIntermediate ? "${params.outdir}/gene-trait" : params.outdir },
+             saveAs: { params.keepIntermediate ? it : null }, mode: 'copy'
+
+  input:
+  tuple val(tissue), path(db_cov)
+  tuple val(gwas_name), path(gwas_file)
+  val gwas_N
+  val gwas_h2
+
+  output:
+  path(outname), emit: outname
+  path(db), emit: db
+
+  script:
+  outname = gwas_name + "_GT_" + tissue + ".csv"
+  db = db_cov[0]
+  covs = db_cov[1]
+  
+  """
+  python ${params.MetaXcan}/software/SPrediXcan.py \
+  --gwas_file ${gwas_file} \
+  --gwas_N ${gwas_N} \
+  --gwas_h2 ${gwas_h2} \
+  --snp_column variant_id \
+  --effect_allele_column effect_allele \
+  --non_effect_allele_column non_effect_allele \
+  --zscore_column zscore \
+  --model_db_path ${db} \
+  --covariance ${covs} \
+  --keep_non_rsid \
+  --additional_output \
+  --model_db_snp_key rsid \
+  --throw \
+  --output_file ${outname}
   """
 }
 
 process smultixcan {
   tag "meta analyzed associations"
+  label "process_medium"
   publishDir path: { params.keepIntermediate ? "${params.outdir}/mgene-trait" : params.outdir },
              saveAs: { params.keepIntermediate ? it : null }, mode: 'copy'
 
@@ -94,30 +130,53 @@ process smultixcan {
   template 'smultixcan.sh'
 }
 
-process smetaboxcan {
-  tag "individual metabolite association"
+process smetaboxcan_raw {
+  tag "individual metabolite association raw"
+  label "process_medium"
   publishDir path: { params.keepIntermediate ? "${params.outdir}/metabo-trait" : params.outdir },
              saveAs: { params.keepIntermediate ? it : null }, mode: 'copy'
 
   input:
-  path(mgtrait)
   tuple val(tissue), path(db_cov)
   tuple val(gwas_name), path(gwas_file)
 
   output:
-  path(outname), emit: smetaboxcan
+  path(outname), emit: outname
 
   script:
-  mg = mgtrait
   outname = gwas_name + "_" + tissue + ".csv"
   db = db_cov[0]
   covs = db_cov[1]
   
-  template 'spredixcan.sh'
+  template 'smetaboxcan.sh'
+}
+
+process smetaboxcan_adj {
+  tag "individual metabolite association adj"
+  label "process_medium"
+  publishDir path: { params.keepIntermediate ? "${params.outdir}/metabo-trait" : params.outdir },
+             saveAs: { params.keepIntermediate ? it : null }, mode: 'copy'
+
+  input:
+  tuple val(tissue), path(db_cov)
+  tuple val(gwas_name), path(gwas_file)
+  val gwas_N
+  val gwas_h2
+
+  output:
+  path(outname), emit: outname
+
+  script:
+  outname = gwas_name + "_" + tissue + ".csv"
+  db = db_cov[0]
+  covs = db_cov[1]
+  
+  template 'smetaboxcan_adj.sh'
 }
 
 process gwas_database {
   tag "covert gwas sumstat into a database"
+  label "process_medium"
   input:
   tuple val(gwas_name), path(gwas_file)
 
@@ -136,8 +195,9 @@ process gwas_database {
 
 process html_report {
   tag "generate report"
-  publishDir path: { params.keepIntermediate ? "${params.outdir}/report" : params.outdir },
-             saveAs: { params.keepIntermediate ? it : null }, mode: 'copy'
+  label "process_medium"
+  publishDir path: "${params.outdir}/report",
+             saveAs: it, mode: 'copy'
 
   input:
   path spred_results
@@ -150,6 +210,8 @@ process html_report {
   path mqtl_db
   path metabo_map
   path ld_blocks
+  path omics_network
+  path gene_info
 
   output:
   path(report), emit: viz_report
@@ -173,6 +235,8 @@ process html_report {
     --mqtl_db ${mqtl_db} \
     --metabo_pathways ${metabo_map} \
     --ld_blocks ${ld_blocks} \
+    --omics_network ${omics_network} \
+    --gene_info ${gene_info} \
     --ntop 20 \
     --rmd_template ${baseDir}/bin/report_template_dbs.Rmd \
     --output_html ${report}

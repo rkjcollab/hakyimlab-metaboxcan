@@ -24,11 +24,11 @@ option_list <- list(
     make_option(c("--mqtl_db"),type = "character", default = NULL,
                 help = "The db containing the metabolite qtls",
                 metavar = "character"),
-    make_option(c("--sample_size"), type="numeric", default=NULL,
-                help="The sample size of the summary stats",
+    make_option(c("--omics_network"), type="character", default=NULL,
+                help="The larger biological network used to find sub-networks",
                 metavar="character"),
-    make_option(c("--h2"), type="numeric", default=NULL,
-                help="The heritability estimate of the summary stat using LDSC",
+    make_option(c("--gene_info"), type="character", default=NULL,
+                help="A file containing more details about a gene to be used in network annot",
                 metavar="character"),
     make_option(c("--metabo_pathways"),type = "character", default = NULL,
                 help = "A summary of pathways for the metabolites",
@@ -85,8 +85,8 @@ params = list(
   phenotype_name = opt$phenotype_name,
   prefix = opt$prefix,
   ntop = opt$ntop,
-  sample_size = opt$sample_size,
-  h2 = opt$h2,
+  omics_network = file_path_as_absolute(opt$omics_network),
+  gene_info = file_path_as_absolute(opt$gene_info),
   output_dir = normalizePath(dirname(opt$output_html), mustWork = FALSE)
 )
 

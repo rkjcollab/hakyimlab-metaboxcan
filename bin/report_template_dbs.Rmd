@@ -22,6 +22,8 @@ params:
   metabo_pathways: NA
   ld_blocks: NA
   liftover_chain: NA
+  omics_network: NA
+  gene_info: NA
   out_prefix: NA
   rlib: NA
   ntop: 20
@@ -49,7 +51,7 @@ suppressMessages(library(patchwork))
 suppressMessages(library(RSQLite))
 suppressMessages(library(igraph))
 suppressMessages(library(visNetwork))
-suppressMessages(library(bacon))
+suppressMessages(library(DT))
 suppressMessages(library(openxlsx))
 suppressMessages(library(rprojroot))
 options(stringsAsFactors = FALSE)
@@ -80,6 +82,8 @@ pathways_file = params$metabo_pathways
 ldblocks_file = params$ld_blocks
 l_chain = params$liftover_chain
 out_dir = params$output_dir
+omics_network = params$omics_network
+gene_info = params$gene_info
 ```
 
 
@@ -89,7 +93,7 @@ This workflow is used to find the associations between genes, metabolite and com
 ```{r out-fig,dpi = 100, out.width="99%", fig.height=5}
 fig_path <- normalizePath(current_input())
 knitr::include_graphics(glue::glue("./metabo_workflow.png"))
-devtools::source_gist("38431b74c6c0bf90c12f")
+#devtools::source_gist("38431b74c6c0bf90c12f")
 ```
 
 ```{r}
@@ -150,10 +154,13 @@ metaboxcan <- fread(smetaboxcan_file) %>% dplyr::filter(!is.na(pvalue))
 gene_metabolite_df <- fread(gene_metabolite_assoc_file)
 # metabolite annotation file
 paths_db <- fread(pathways_file)
+# network files
+m.network <- fread(omics_network)
+gene_info <- fread(gene_info)
 ```
 
 
-# Manhattan plot for associated genes, metabolites and trait
+# Manhattan plot for associated genes, metabolites and the trait
 For each gene associated with `r phenotype_name`, eqtls are fetched from the GTEx portal and used to generate the manhattan plot. For each metabolite associated with `r phenotype_name` significantly (10^-3) associated mqtls are fetched and used to generate the manhattan plot. 
 ```{r get_sig_genes, echo=FALSE}
 sig_gene_df <- multixcan %>% 
@@ -222,17 +229,20 @@ gw_eqtls$color <- as.character(factor(gw_eqtls$geneSymbol,
 ```{r get_sig_metabolites}
 sig_metab_df <- metaboxcan %>% 
   dplyr::filter(pvalue < 0.05/nrow(metaboxcan)) %>% 
-  dplyr::select(gene,gene_name,pvalue,zscore,best_gwas_p) %>% 
-  dplyr::rename(metabolite_index=gene, Metabolite=gene_name) 
+  dplyr::select(gene,gene_name,pvalue,zscore,best_gwas_p)
 
 if (nrow(sig_metab_df) == 0) {
   print(paste0("NB: No Significant association at pvalue of ",0.05/nrow(metaboxcan),"(bonferroni sig). We are selecting the top 100 metabolite associations only."))
   sig_metab_df <- metaboxcan %>% 
     slice_min(pvalue, n = 100) %>% 
-    dplyr::select(gene,gene_name,pvalue,zscore,best_gwas_p) %>% 
-    dplyr::rename(metabolite_index=gene, Metabolite=gene_name) 
+    dplyr::select(gene,gene_name,pvalue,zscore,best_gwas_p) 
+    #dplyr::rename(metabolite_index=gene, Metabolite=gene_name) 
 }
 
+sig_metab_df <- paths_db %>% dplyr::select(metabolite = Metabolite.ID, 
+                                    metabolite_name = Biochemical.name, HMDB) %>%
+  inner_join(sig_metab_df %>% dplyr::select(-gene_name), by = c("metabolite" = "gene")) %>%
+  distinct(metabolite, .keep_all = TRUE)
 ```
 
 ```{r gw_mqtl, echo=FALSE}
@@ -241,12 +251,12 @@ if (nrow(sig_metab_df) == 0) {
 m_con <- dbConnect(RSQLite::SQLite(), metabolite_qtls_file)
 metabo_db <- tbl(m_con,"snp2metabo")
 gw_mqtls <- metabo_db %>% 
-  dplyr::filter(metabolite %in% local(sig_metab_df$metabolite_index)) %>% 
+  dplyr::filter(metabolite %in% local(sig_metab_df$metabolite)) %>% 
   dplyr::select(metabolite,rsid,chr, pos, pvalue) %>% 
   collect()
 dbDisconnect(m_con)
 
-#TODO metabolift_over
+#TODO metabo liftover if not hg38
 # liftover coordinates
 if (! is.null(l_chain)) {
   # check if we have snps
@@ -300,26 +310,6 @@ comb_df %>%
         panel.grid.minor.x = element_blank())
 ```
 
-# Comparison between individual tissue SPrediXcan and SMultiXcan
-Imputed gene expression was performed using `r length(s_files)` tissues using SPrediXcan. The individual tissue imputed expressions z-scores are compared against the meta-analyzed results mean z-scores from all tissues using SMultiXcan.
-The number of significant genes associated with the `r phenotype_name` from each tissue after bonferroni correction (O.O5 /number of imputed gene) is summarized below.
-```{r tissue_summary, echo=FALSE, warning=FALSE, eval=TRUE}
-summary_df <- data.frame(tissue=as.character(),sig_gene=as.numeric(),n_genes=as.numeric())
-for (infile in s_files){
-  spredixcan <- fread(infile)
-  out_name = str_remove(basename(file_path_sans_ext(infile)), glue::glue("{prefix_name}_GT_en_"))
-  #out_name = str_remove(basename(file_path_sans_ext(infile)), glue::glue("{prefix_name}_en_"))
-  s_df <- spredixcan %>%
-    filter(pvalue < 0.05/nrow(spredixcan))
-  
-  s_df <- data.frame(tissue=out_name,sig_gene=nrow(s_df),n_genes=nrow(spredixcan))
-  summary_df <- rbind(summary_df,s_df)
-}
-
-kbl(summary_df) %>%
-  kable_paper() %>%
-  scroll_box(height = "500px")
-```
 
 # Gene level results
 ## Top `r ntop` genes associated with `r phenotype_name`
@@ -339,9 +329,11 @@ cytoband_data <- corrected_gene_df %>%
   addband2gene(.,"gene") %>% 
   dplyr::select(gene, gene_name, cytoband, pvalue,z_mean, t_i_best)
 
-kbl(cytoband_data) %>%
-  kable_paper() %>%
-  scroll_box(height = "400px")
+DT::datatable(cytoband_data,
+    options = list(
+    scrollY = 500,  
+    paging = FALSE  
+  ))
 ```
 
 The total number of significant genes associated with `r phenotype_name` is 
@@ -427,9 +419,12 @@ locus_summary <- locus_top_gene %>%
   mutate(pvalue = format(pvalue, scientific= T, digits=2)) %>% 
   mutate_if(is.numeric, format, digits=2)
 
-kbl(locus_summary) %>%
-  kable_paper() %>%
-  scroll_box(width = "100%", height = "400px")
+DT::datatable(locus_summary,
+    options = list(
+    scrollY = 500,
+    scrollX = TRUE,  
+    paging = FALSE  
+  ))
 ```
 
 ## Distribution of loci by chromosome
@@ -440,9 +435,11 @@ chr_dist <- locus_summary %>% group_by(locus_chr) %>% mutate(loci_count = n()) %
   left_join(locus_summary %>% group_by(locus_chr) %>% 
               summarize(loci_in_chr = paste(sort(unique(locus_name)),collapse=", ")))
 
-kbl(chr_dist) %>%
-  kable_paper() %>%
-  scroll_box(width = "100%", height = "400px")
+DT::datatable(chr_dist,
+    options = list(
+    scrollY = 500,  
+    paging = FALSE  
+  ))
 ```
 
 
@@ -473,7 +470,6 @@ for (ld_locus in pl_loci){
 The top metabolite associations are determined from the SMetaboXcan results. Significant metabolites are selected after bonferroni correction (pvalue set at 0.05/total_metabolites). The metabolites are then ordered in descending value of -log10(p).
 
 ```{r top_metabo_assoc, echo=FALSE}
-p_metaboxcan <- metaboxcan
 # Top associations
 corrected_metab_df <- sig_metab_df %>% 
   slice_min(pvalue, n = ntop) %>% 
@@ -481,9 +477,11 @@ corrected_metab_df <- sig_metab_df %>%
   mutate(pvalue = format(pvalue, scientific= T, digits=2)) %>% 
   mutate_if(is.numeric, format, digits=2)
 
-kbl(corrected_metab_df) %>%
-  kable_paper() %>%
-  scroll_box(height = "400px")
+DT::datatable(corrected_metab_df,
+    options = list(
+    scrollY = 500,  
+    paging = FALSE  
+  ))
 ```
 
 
@@ -500,12 +498,9 @@ acat = function(pvec)
 }
 
 pathway_metabo <- paths_db %>% 
-  dplyr::select(Metabolite.ID,COMP_ID,SUB_PATHWAY, SUPER_PATHWAY) %>% 
-  #dplyr::mutate(metabolite = ifelse(!is.na(COMP_ID),
-   #                                 glue::glue("met{COMP_ID}"),Metabolite.ID)) %>% 
-  dplyr::mutate(metabolite = Metabolite.ID) %>% 
-  dplyr::select(-c(Metabolite.ID,COMP_ID)) %>% 
-  right_join(p_metaboxcan %>% 
+  dplyr::select(Metabolite.ID,Biochemical.name, SUB_PATHWAY, SUPER_PATHWAY) %>% 
+  dplyr::rename(metabolite = Metabolite.ID, metabolite_name = Biochemical.name) %>% 
+  right_join(metaboxcan %>% 
                dplyr::select(gene,zscore, pvalue) %>% 
                mutate(gene = gsub("\\..*","",gene)), 
              by = c("metabolite" = "gene")) %>% 
@@ -522,14 +517,19 @@ pathway_summary <- pathway_metabo %>% group_by(SUB_PATHWAY) %>%
   transmute(super_pathway = SUPER_PATHWAY, mean_zscore = mean(zscore), 
             min_zscore = min(zscore),max_zscore = max(zscore),
             acat_pvalue = acat(pvalue),
-            no_of_metabolites = n()) %>% distinct() %>% 
+            no_of_metabolites = n(),
+            metabolites = paste(metabolite_name[1:10],collapse=", ")) %>% distinct() %>% 
+  dplyr::mutate(metabolites = str_remove_all(metabolites, ", NA")) %>%
   mutate_at(vars(mean_zscore, min_zscore, max_zscore), ~round(., 2)) %>% 
-  arrange(acat_pvalue) %>%  dplyr::rename(sub_pathway = SUB_PATHWAY) 
+  arrange(acat_pvalue) %>%  dplyr::rename(sub_pathway = SUB_PATHWAY)
 
-kbl(pathway_summary %>% 
-      dplyr::mutate(acat_pvalue = format(acat_pvalue, scientific= T, digits=2))) %>%
-  kable_paper() %>%
-  scroll_box(height = "500px")
+DT::datatable(pathway_summary %>% 
+      dplyr::mutate(acat_pvalue = format(acat_pvalue, scientific= T, digits=2)),
+    options = list(
+    scrollY = 500,  # Set the scroll height to 600 pixels
+    scrollX = TRUE,
+    paging = FALSE  # Disable pagination if you want all rows in the scrollable area
+  ))
 ```
 
 ## Distribution of metabolite sub-pathway pvalues(acat)
@@ -537,10 +537,152 @@ The black line indicates the bonferroni significance threshold.
 ```{r pathway-qqunif, warning=FALSE, echo=FALSE}
 
 ## source qqunif from github
-devtools::source_gist("38431b74c6c0bf90c12f")
+#devtools::source_gist("38431b74c6c0bf90c12f")
+qqunif = 
+  function(p,BH=T,CI=T,mlog10_p_thres=30,...)
+  {
+    ## thresholded by default at 1e-30
+    p=na.omit(p)
+    nn = length(p)
+    xx =  -log10((1:nn)/(nn+1))
+    
+    p_thres = 10^{-mlog10_p_thres}
+    if( sum( p < p_thres) )
+    {
+      warning(paste("thresholding p to ",p_thres) )
+      p = pmax(p, p_thres)
+    }
+    plot( xx,  -sort(log10(p)),
+          xlab=expression(Expected~~-log[10](italic(p))),
+          ylab=expression(Observed~~-log[10](italic(p))),
+          cex.lab=1.4,mgp=c(2,1,0),
+          ... )
+    abline(0,1,col='gray')
+    if(BH)
+    {
+      abline(-log10(0.05),1, col='orange',lty=1)
+      abline(-log10(0.10),1, col='orange',lty=2)
+      abline(-log10(0.25),1, col='orange',lty=3)
+      legend('topleft', c("FDR = 0.05","FDR = 0.10","FDR = 0.25"),
+             col=c('orange','orange','orange'),lty=1:3, cex=1)
+      abline(h=-log10(0.05/nn)) ## bonferroni
+    }
+    if(CI)
+    {
+      ## create the confidence intervals
+      c95 <- rep(0,nn)
+      c05 <- rep(0,nn)
+      ## the jth order statistic from a
+      ## uniform(0,1) sample
+      ## has a beta(j,n-j+1) distribution
+      ## (Casella & Berger, 2002,
+      ## 2nd edition, pg 230, Duxbury)
+      ## this portion was posted by anonymous on
+      ## http://gettinggeneticsdone.blogspot.com/2009/11/qq-plots-of-p-values-in-r-using-ggplot2.html
+      
+      for(i in 1:nn)
+      {
+        c95[i] <- qbeta(0.95,i,nn-i+1)
+        c05[i] <- qbeta(0.05,i,nn-i+1)
+      }
+      
+      lines(xx,-log10(c95),col='gray')
+      lines(xx,-log10(c05),col='gray')
+    }
+  }
+
+## to add other qqplots on top of current plot
+qqpoints = 
+function(p,BH=T,mlog10_p_thres=30,...)
+{
+  ## thresholded by default at 1e-30
+  p=na.omit(p)
+  nn = length(p)
+  xx =  -log10((1:nn)/(nn+1))
+  
+  p_thres = 10^{-mlog10_p_thres}
+  if( sum( p < p_thres) )
+  {
+    warning(paste("thresholding p to ",p_thres) )
+    p = pmax(p, p_thres)
+  }
+  nn = length(p)
+  xx =  -log10((1:nn)/(nn+1))
+  points( xx,  -sort(log10(p)), ... )
+}
+
+## to use with dplyr's pipes
+
+qqunif.pipe = function(data,...){
+  pval = data$pval
+  qqunif(pval,...)
+}
+
+qqunif.compare = function(pvec1,pvec2,pthres=NULL,BF2=FALSE,col2='blue',cex2=1,...)
+{
+  pvec1 = na.omit(pvec1)
+  pvec2 = na.omit(pvec2)
+  if(!is.null(pthres)) {pvec1 = pmax(pvec1,pthres); pvec2 = pmax(pvec2,pthres)}
+  qqunif(pvec1,...)
+  qqpoints(pvec2,col=col2,pch='+',cex=cex2)
+  if(BF2) abline(h=-log10(0.05/length(pvec2)),col='blue',lw=2)
+}
+
+## testing
+qqunif_maxp = 
+  function(p,BH=T,CI=T,mlog10_p_thres=30,maxp=1,...)
+  {
+    ## thresholded by default at 1e-30
+    p=na.omit(p)
+    nn = length(p)
+    xx =  -log10( (1:nn)*maxp / (nn+1) )
+    
+    p_thres = 10^{-mlog10_p_thres}
+    if( sum( p < p_thres) )
+    {
+      warning(paste("thresholding p to ",p_thres) )
+      p = pmax(p, p_thres)
+    }
+    plot( xx,  -sort(log10(p)),
+          xlab=expression(Expected~~-log[10](italic(p))),
+          ylab=expression(Observed~~-log[10](italic(p))),
+          cex.lab=1.4,mgp=c(2,1,0),
+          ... )
+    abline(0,1,col='gray')
+    if(BH)
+    {
+      abline(-log10(0.05),1, col='red',lty=1)
+      abline(-log10(0.10),1, col='orange',lty=2)
+      abline(-log10(0.25),1, col='yellow',lty=3)
+      legend('topleft', c("FDR = 0.05","FDR = 0.10","FDR = 0.25"),
+             col=c('red','orange','yellow'),lty=1:3, cex=1)
+      abline(h=-log10(0.05/nn)) ## bonferroni
+    }
+    if(CI)
+    {
+      ## create the confidence intervals
+      c95 <- rep(0,nn)
+      c05 <- rep(0,nn)
+      ## the jth order statistic from a
+      ## uniform(0,1) sample
+      ## has a beta(j,n-j+1) distribution
+      ## (Casella & Berger, 2002,
+      ## 2nd edition, pg 230, Duxbury)
+      ## this portion was posted by anonymous on
+      ## http://gettinggeneticsdone.blogspot.com/2009/11/qq-plots-of-p-values-in-r-using-ggplot2.html
+
+      for(i in 1:nn)
+      {
+        c95[i] <- qbeta(0.95,i,nn-i+1)*maxp ## CHECK THIS IS RIGHT
+        c05[i] <- qbeta(0.05,i,nn-i+1)*maxp
+      }
+
+      lines(xx,-log10(c95),col='gray')
+      lines(xx,-log10(c05),col='gray')
+    }
+  }
 
 qqunif(pathway_summary$acat_pvalue)
-
 ```
 
 ## Ranked pathways association with `r phenotype_name`
@@ -709,15 +851,15 @@ for(metabo in unique(pathway_summary$sub_pathway)[1:9]){
 A GWAS plot for each of the above metabolites associated with with the trait.The pink line shows the genome-wide significance line (5e-08) while the grey one shows suggestive significance line (1e-5).
 ```{r metabo-gwas_plots, echo=FALSE}
 
-if(length(corrected_metab_df$metabolite_index) >= 5){
-  pl_metabo <- corrected_metab_df$metabolite_index[1:5]
+if(length(corrected_metab_df$metabolite) >= 5){
+  pl_metabo <- corrected_metab_df$metabolite[1:5]
 } else {
-  pl_metabo <- corrected_metab_df$metabolite_index
+  pl_metabo <- corrected_metab_df$metabolite
 }
 
 for (metab in pl_metabo){
   # get the metname
-  met_name <- corrected_metab_df[corrected_metab_df$metabolite_index == metab,]$Metabolite
+  met_name <- corrected_metab_df[corrected_metab_df$metabolite == metab,]$metabolite_name
   # subset the data
   m_con <- dbConnect(RSQLite::SQLite(), metabolite_qtls_file)
   metabo_db <- tbl(m_con,"snp2metabo")
@@ -765,13 +907,41 @@ for (metab in pl_metabo){
 
 ```
 
+# Multiomic overview relationship to the trait
+Combine gene level and metabolite level results to understand the connection between the molecular traits
+```{r multiomic_view, echo=FALSE}
+multi_dta <- gene_metabolite_df %>% dplyr::select(gene,Metabolite) %>% 
+  dplyr::inner_join(paths_db %>% dplyr::select(Metabolite.ID,metabolite_name = Biochemical.name),
+             by = c("Metabolite" = "Metabolite.ID")) %>% 
+  dplyr::inner_join(metaboxcan, by = c("Metabolite" = "gene")) %>% 
+  dplyr::select(gene, Metabolite, metabolite_name, metabo_pval=pvalue, metabo_zscore=zscore) %>% 
+  dplyr::inner_join(multixcan %>% dplyr::select(gene,gene_name, gene_pval = pvalue), 
+             by = c("gene" = "gene"))
+
+multi_clusters <- multi_dta %>% group_by(Metabolite) %>%
+  arrange(metabo_pval, gene_pval) %>%
+  transmute(metabolite_name = metabolite_name,
+            m2t_p = metabo_pval,
+            g2t_acat_p = acat(gene_pval),
+            no_of_genes = n(),
+            genes = paste(gene_name[1:10],collapse=", ")) %>%
+  distinct() %>% 
+  dplyr::mutate(genes = str_remove_all(genes, ", NA")) %>%
+  arrange(m2t_p,g2t_acat_p) %>%
+  mutate(m2t_p = format(m2t_p, scientific= T, digits=2),
+         g2t_acat_p = format(g2t_acat_p, scientific= T, digits=2))
+
+# view
+DT::datatable(multi_clusters,
+    options = list(
+    scrollY = 500,  # Set the scroll height to 500 pixels
+    paging = FALSE  # Disable pagination if you want all rows in the scrollable area
+  ))
+```
 
 # Network analysis and candidate clusters
-```{r network, echo=FALSE}
+```{r network, echo=FALSE, warning=FALSE}
 source("./net.R")
-
-m.network <- fread("/gpfs/data/im-lab/nas40t2/festus/metabolomics/pipeline/data/main-network-small.tsv")
-gene_info <- fread("/gpfs/data/im-lab/nas40t2/festus/metabolomics/pipeline/data/gene-info.tsv")
 met_info <- paths_db
 
 # get scores table
@@ -823,9 +993,12 @@ visSave(network, file = glue::glue("{n.dir}/{phenotype_name}_network.html"))
 # tables
 clusters <- get_clusters(n.nodes)
 #main_neighbors <- get_neighbors(m.network,ss,1)
-kbl(clusters) %>%
-  kable_paper() %>%
-  scroll_box(width = "100%", height = "500px")
+
+DT::datatable(clusters,
+    options = list(
+    scrollY = 500,  
+    paging = FALSE  
+  ))
 ```
 
 
@@ -842,9 +1015,9 @@ all_gene_assoc <- gene_metabolite_df %>%
 
 all_met_assoc <- gene_metabolite_df %>% 
   dplyr::select(gene,Metabolite,pvalue) %>%  
-  dplyr::filter(Metabolite %in% sig_metab_df$Metabolite) %>% 
-  left_join(sig_metab_df %>% dplyr::select(Metabolite, pvalue) %>%
-              dplyr::rename(met_trait_pval = pvalue), by = "Metabolite") 
+  dplyr::filter(Metabolite %in% sig_metab_df$metabolite) %>% 
+  left_join(sig_metab_df %>% dplyr::select(metabolite, pvalue) %>%
+              dplyr::rename(met_trait_pval = pvalue), by = c("Metabolite" = "metabolite")) 
   
 
 best_overlap <- all_gene_assoc %>% 
@@ -882,7 +1055,7 @@ if (nrow(best_overlap) == 0) {
   m_con <- dbConnect(RSQLite::SQLite(), metabolite_qtls_file)
   metabo_db <- tbl(m_con,"snp2metabo")
   best_mqtls <- metabo_db %>% 
-    dplyr::filter(metabolite %in% local(best_overlap$metabolite_index)) %>% 
+    dplyr::filter(metabolite %in% local(best_overlap$metabolite)) %>% 
     dplyr::select(metabolite,rsid,chr, pos, pvalue) %>% 
     collect()
   dbDisconnect(m_con)
@@ -965,7 +1138,6 @@ if(nrow(all_loci) == 1){
 ```{r save-res,message=FALSE,warning=FALSE,results=FALSE}
 
 o.dir=glue::glue("{out_dir}/summaries")
-#o.dir=glue::glue("/Users/festo/Documents/HakyIm/metsim-phi/summaries")
 if(!dir.exists(o.dir)){ dir.create(o.dir)}
 phenotype_name = str_replace(phenotype_name, " ", "_")
 of=glue::glue("{o.dir}/{phenotype_name}_summary.xlsx")
@@ -978,16 +1150,11 @@ sname <- "multixcan"
 addWorksheet(OUT, sname)
 writeData(OUT, sheet = sname, x = multixcan)
 
-# smultixcan
-metaboxcan <- metaboxcan %>% 
-  dplyr::rename(metabo_id = gene, metabolite = gene_name) %>% 
-  dplyr::select(-c(pvalue,zscore)) %>% 
-  inner_join(met_info %>% dplyr::select(Metabolite.ID,HMDB,Biochemical.name),
-             by = c("metabolite" = "Metabolite.ID")) %>% 
-  dplyr::relocate(HMDB, .after = metabolite) %>% 
-  dplyr::relocate(Biochemical.name, .after = HMDB) %>% 
-  dplyr::select(-c(metabo_id, effect_size, var_g, pred_perf_r2,pred_perf_pval,
-            pred_perf_qval,n_snps_in_cov))
+# smetaboxcan
+metaboxcan <- paths_db %>% dplyr::select(metabolite = Metabolite.ID, 
+                                    metabolite_name = Biochemical.name, HMDB) %>%
+  dplyr::inner_join(metaboxcan %>% dplyr::select(-gene_name), by = c("metabolite" = "gene")) %>%
+  dplyr::distinct(metabolite, .keep_all = TRUE)
   
 sname <- "metaboxcan"
 addWorksheet(OUT, sname)
@@ -998,8 +1165,13 @@ sname <- "pathways"
 addWorksheet(OUT, sname)
 writeData(OUT, sheet = sname, x = pathway_summary)
 
-# smultixcan
-sname <- "clusters"
+# multiomic clusters
+sname <- "multiomic_clusters"
+addWorksheet(OUT, sname)
+writeData(OUT, sheet = sname, x = multi_clusters)
+
+# network clusters
+sname <- "network_clusters"
 addWorksheet(OUT, sname)
 writeData(OUT, sheet = sname, x = clusters)
 
