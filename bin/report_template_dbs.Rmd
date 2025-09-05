@@ -53,6 +53,7 @@ suppressMessages(library(igraph))
 suppressMessages(library(visNetwork))
 suppressMessages(library(DT))
 suppressMessages(library(openxlsx))
+suppressMessages(library(gprofiler2))
 suppressMessages(library(rprojroot))
 options(stringsAsFactors = FALSE)
 #use_python("/Users/festo/miniconda3/envs/bioinf/bin/python3")
@@ -908,7 +909,8 @@ for (metab in pl_metabo){
 ```
 
 # Multiomic overview relationship to the trait
-Combine gene level and metabolite level results to understand the connection between the molecular traits
+Combine gene level and metabolite level results to understand the connection between the molecular traits. 
+In this section we look at the enrichment of the most significant gene cluster (acat pvalue) associated with the metabolite level results.
 ```{r multiomic_view, echo=FALSE}
 multi_dta <- gene_metabolite_df %>% dplyr::select(gene,Metabolite) %>% 
   dplyr::inner_join(paths_db %>% dplyr::select(Metabolite.ID,metabolite_name = Biochemical.name),
@@ -927,9 +929,20 @@ multi_clusters <- multi_dta %>% group_by(Metabolite) %>%
             genes = paste(gene_name[1:10],collapse=", ")) %>%
   distinct() %>% 
   dplyr::mutate(genes = str_remove_all(genes, ", NA")) %>%
-  arrange(m2t_p,g2t_acat_p) %>%
+  arrange(g2t_acat_p,m2t_p) %>%
   mutate(m2t_p = format(m2t_p, scientific= T, digits=2),
          g2t_acat_p = format(g2t_acat_p, scientific= T, digits=2))
+
+multi_clusters.full <- multi_dta %>% group_by(Metabolite) %>%
+  arrange(metabo_pval, gene_pval) %>%
+  transmute(metabolite_name = metabolite_name,
+            m2t_p = metabo_pval,
+            g2t_acat_p = acat(gene_pval),
+            no_of_genes = n(),
+            genes = paste(gene_name,collapse=", ")) %>%
+  distinct() %>% 
+  dplyr::mutate(genes = str_remove_all(genes, ", NA")) %>%
+  arrange(g2t_acat_p,m2t_p)
 
 # view
 DT::datatable(multi_clusters,
@@ -938,6 +951,55 @@ DT::datatable(multi_clusters,
     paging = FALSE  # Disable pagination if you want all rows in the scrollable area
   ))
 ```
+
+Enrichment analysis of the most significant gene cluster from the M-TWAS proxy
+
+```{r enrich-multi, warning=FALSE}
+# get the most significant cluster
+top_cluster <- multi_clusters.full %>% ungroup() %>%
+  dplyr::slice_min(g2t_acat_p, n = 1)
+
+cluster_metabo <- top_cluster$metabolite_name
+#print((cluster_metabo))
+cluster_genes <- multi_dta %>% 
+  dplyr::filter(Metabolite == top_cluster$Metabolite) %>% 
+  dplyr::filter(! is.na(gene)) %>%
+  pull(gene_name)
+
+# enrichment analysis
+gostres <- gost(query = cluster_genes)
+```
+
+```{r enrich-plot, out.width="99%"}
+if (!is.null(gostres$result)) {
+  plot <- gostplot(gostres, capped = FALSE, interactive = F) +
+    ggplot2::ggtitle(glue::glue("Enrichment Results for {cluster_metabo} associated genes")) +
+    ggplot2::theme(plot.title = ggplot2::element_text(hjust = 0.5, size = 12))
+  #plot <- plotly::layout(plot, title = glue::glue("Enrichment Results for {cluster_metabo} genes"))
+  print(plot)
+}
+```
+
+```{r enrich-table}
+# Show the full enrichment table
+if (!is.null(gostres$result)) {
+  enrich_table <- gostres$result %>% data.frame() %>% 
+    dplyr::select(source,term_id, term_name, p_value, significant,term_size, 
+                  query_size, intersection_size, precision, recall) %>%
+    mutate(p_value = format(p_value, scientific= T, digits=2)) %>%
+    mutate_if(is.numeric, format, digits=2)
+  DT::datatable(enrich_table,
+      options = list(
+      scrollX = TRUE, 
+      scrollY = 300,  # Set the scroll height to 300 pixels
+      paging = FALSE  # Disable pagination if you want all rows in the scrollable area
+    ))
+} else {
+    print(glue::glue("No enrichment results found for the selected {cluster_metabo} gene cluster."))
+}
+```
+
+
 
 # Network analysis and candidate clusters
 ```{r network, echo=FALSE, warning=FALSE}
@@ -1168,7 +1230,7 @@ writeData(OUT, sheet = sname, x = pathway_summary)
 # multiomic clusters
 sname <- "multiomic_clusters"
 addWorksheet(OUT, sname)
-writeData(OUT, sheet = sname, x = multi_clusters)
+writeData(OUT, sheet = sname, x = multi_clusters.full)
 
 # network clusters
 sname <- "network_clusters"
