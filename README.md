@@ -2,9 +2,15 @@
 This is a pipeline used to run the MetaboXcan reports where we look at the association of metabolites and genes to complex traits.
 
 ### Env set up
+You can install the environment required to execute metaboxcan using the [`env.yaml`](./env/env.yaml) file provided in this repository
+```{bash}
+conda env create -f env/env.yaml
+conda activate metaboxcan
+```
+Before executing metaboxcan you need to ensure all packages listed in [rpackages.txt](./env/rpackages.txt) are installed in R. MetaboXcan was developed on R 4.2.1 and should work in later versions of R.
 
 ### Data preparation
-Once you git clone the repository you need to download additional data used to generate the reports. Donwload all the files from this [box folder]() into the data folder.
+Once you git clone the repository you need to download additional data used to generate the reports. Download all the files from this [box folder](https://uchicago.app.box.com/s/acryijtnxltz5a0dpf1qdkljwyxcodjn) into a folder named `data`. 
 
 ```{bash}
 cd metaboxcan
