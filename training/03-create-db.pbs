@@ -1,0 +1,32 @@
+#! /usr/bin/env bash
+
+#PBS -N gather_lasso
+#PBS -S /bin/bash
+#PBS -l walltime=12:00:00
+#PBS -l mem=16gb
+#PBS -l nodes=1:ppn=4
+
+# SPECIFY LOGGING BEHAVIOR
+
+#PBS -o logs/lasso/${PBS_JOBNAME}.${PBS_JOBID}.log
+#PBS -e logs/lasso/${PBS_JOBNAME}.${PBS_JOBID}.err
+
+
+source ~/.bashrc
+module load gcc/6.2.0
+module load R/3.6.3
+
+pre=results/metsim-invnorm-lasso-model
+data_dir=results/lasso/metsim-lasso_weights
+
+# gather the cv
+Rscript gather_lasso_perf.R \
+  --input_dir ${data_dir} \
+  --output_prefix ${pre}_cv
+
+# create a databsae
+Rscript create_lasso_db.R \
+  --input_dir ${data_dir} \
+  --bim_file data/train/metsim_train-hapmap3.bim \
+  --r2_file ${pre}_cv_r2_performance.txt \
+  --out_db ${pre}.db

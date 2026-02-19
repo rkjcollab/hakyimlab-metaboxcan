@@ -1,0 +1,25 @@
+
+# memory to use for plink
+mem: 24000
+
+# number of cores available (default 1) 
+nCores: 4
+
+# max number of iterations (default 50)  
+niter: 50 
+
+# recommended for faster computation performance (default TRUE) use.glmnetPlus: TRUE 
+use.glmnetPlus: TRUE 
+
+# SNP batch size (the number of SNPs to consider in batch)
+num.snps.batch: 200
+
+# path to plink2 program 
+# on washington
+# plink2.path: "/vol/bmd/yanyul/softwares/plink2" 
+# on CRI. 
+plink2.path: '/path/to/plink2'
+
+
+# path to zstdcat program
+zstdcat.path: "/path/to/zstdcat" 

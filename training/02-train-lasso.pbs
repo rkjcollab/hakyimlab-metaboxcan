@@ -1,0 +1,60 @@
+#!/bin/bash
+
+#PBS -N gw_lasso
+#PBS -S /bin/bash
+#PBS -l walltime=48:00:00
+#PBS -l mem=72gb
+#PBS -l nodes=1:ppn=4
+
+# SPECIFY LOGGING BEHAVIOR
+
+#PBS -o logs/lasso/${PBS_JOBNAME}.${PBS_JOBID}.log
+#PBS -e logs/lasso/${PBS_JOBNAME}.${PBS_JOBID}.err
+
+module load gcc/6.2.0 
+module load miniconda3/4.7.10
+
+source ~/.bashrc
+conda activate snpnet
+
+echo "`date` Starting"
+
+# format the phenonames to remove _ to -
+#sed -e 's/_/-/g' metsim-invnorm.txt > metsim-invnorm_lasso.txt
+if [[ ! -f data/metabolites/metsim-invnorm_lasso.txt ]]; then
+  sed -e 's/_/-/g' data/metabolites/metsim-invnorm.txt > \
+  data/metabolites/metsim-invnorm_lasso.txt
+
+fi
+
+phenolist=data/metabolites/all_phenos.txt
+
+## Perfomance metrics run
+Rscript run_gw_lasso.R \
+--phenotype_table data/metabolites/metsim-invnorm_lasso.txt \
+--genotype data/train/metsim_train-hapmap3_pgen \
+--pheno_list ${phenolist} \
+--snpnet_config snpnet_config.yaml \
+--indiv_col IID \
+--nfold 5 \
+--inner_nfold 5 \
+--mode cv_performance \
+--remove_missing_in_phenotype \
+--output_prefix results/lasso/metsim-lasso_perf
+
+
+
+## Model training run
+Rscript run_gw_lasso.R \
+--phenotype_table data/metabolites/metsim-invnorm_lasso.txt \
+--genotype data/train/metsim_train-hapmap3_pgen \
+--pheno_list ${phenolist} \
+--snpnet_config snpnet_config.yaml \
+--indiv_col IID \
+--nfold 5 \
+--inner_nfold 5 \
+--mode model_training \
+--remove_missing_in_phenotype \
+--output_prefix results/lasso/metsim-lasso_weights
+
+echo "`date` Exiting"
