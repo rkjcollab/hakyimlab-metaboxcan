@@ -1,13 +1,21 @@
 #! /usr/bin/env bash
 
-while getopts p:o: opt; do
-   case "${opt}" in
-      p) plink_prefix=${OPTARG};;
-      o) out_dir=${OPTARG}
-      \?) echo "Invalid option -$OPTARG" >&2
-      exit 1;;
-   esac
+set -euo pipefail
+
+usage() {
+  echo "Usage: $0 -p <plink_prefix> -o <out_dir>"
+  exit 1
+}
+
+while getopts ":p:o:" opt; do
+  case "${opt}" in
+    p) plink_prefix=${OPTARG};;
+    o) out_dir=${OPTARG};;
+    :) echo "Option -$OPTARG requires an argument." >&2; usage;;
+    \?) echo "Invalid option: -$OPTARG" >&2; usage;;
+  esac
 done
+
 
 #TODO: before this:
   # do we need to clean genetic data (SNP & sample missingness?, HWE?)
@@ -36,12 +44,14 @@ check_file_exists() {
 }
 
 # Make output directories if needed
-mkdir -p "${out_dir}/data"
+mkdir -p "${out_dir}/data/train"
+mkdir -p "${out_dir}/data/test"
 
 ## get individual list
 #TODO: need to either check input is .fam or ?
 check_file_exists "${plink_prefix}.fam"
-cut -f1,2 -d " " "${plink_prefix}.fam" > "${out_dir}/data/individuals.txt"
+# cut -f1,2 -d " " "${plink_prefix}.fam" > "${out_dir}/data/individuals.txt"
+awk '{print $1, $2}' "${plink_prefix}.fam" > "${out_dir}/data/individuals.txt"
 
 ## random shuffle with a seed to select individuals randomly
 # get ids to split individuals into training and testing
@@ -115,7 +125,7 @@ awk -F"\t" '{print $2"\t"$2"\t"$3}' "${out_dir}/data/train/train_pgen.psam.bak" 
 
 ## Dont use underscore in names, has a problem with gw_lasso
 #TODO: resolve this in PLINK command instead?
-sed -i  -e 's/^IID/#FID/' -e 's/_/-/g' data/train/train_pgen.psam
+sed -i  -e 's/^IID/#FID/' -e 's/_/-/g' "${out_dir}/data/train/train_pgen.psam"
 
 
 ## make bgen for gw ridge prediction
@@ -125,7 +135,7 @@ plink2 \
   --export bgen-1.3 \
   --out "${out_dir}/data/test/test_bgen"
 
-bgenix -g data/test/test_bgen.bgen -index
+bgenix -g "${out_dir}/data/test/test_bgen.bgen -index
 
 ## make vcf for prediction to test the models
 plink2 \
