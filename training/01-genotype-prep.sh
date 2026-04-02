@@ -1,34 +1,73 @@
 #! /usr/bin/env bash
 
+while getopts p:o: opt; do
+   case "${opt}" in
+      p) plink_prefix=${OPTARG};;
+      o) out_dir=${OPTARG}
+      \?) echo "Invalid option -$OPTARG" >&2
+      exit 1;;
+   esac
+done
+
+#TODO: before this:
+  # do we need to clean genetic data (SNP & sample missingness?, HWE?)
+  # if add this step, could also add filter to HapMap3 SNPs only
+
+
+#TODO: for now, adding variable paths but keeping hardcoded file names to
+# enable ease of questions to Festus if needed.
+#TODO: maybe build plink file name into output folder, but keep files general?
+#TODO: add thread_num as variable
+
+#TODO: revisit how want to handle environment
 module load gcc/6.2.0
 module load bcftools
 module load plink/1.90
+module load plink/2.0
 module load gcta
+module load bgen/1.1.3
+
+# Function to check file exists, use for commands that could fail silently
+check_file_exists() {
+   if [ ! -f "$1" ]; then
+      echo "Error: Required file '$1' not found." >&2
+      exit 1
+   fi
+}
+
+# Make output directories if needed
+mkdir -p "${out_dir}/data"
 
 ## get individual list
-cut -f1,2 -d " " genotype/metsim_info03_n6136_rsid.fam > data/individuals.txt
+#TODO: need to either check input is .fam or ?
+check_file_exists "${plink_prefix}.fam"
+cut -f1,2 -d " " "${plink_prefix}.fam" > "${out_dir}/data/individuals.txt"
 
 ## random shuffle with a seed to select individuals randomly
 # get ids to split individuals into training and testing
-shuf --random-source=<(yes 149) data/individuals.txt | head -n 400 > data/test_indiv.txt
+shuf --random-source=<(yes 149) "${out_dir}/data/individuals.txt" | \
+  head -n 400 > "${out_dir}/data/test_indiv.txt"
 
-grep -v -x -f data/test_indiv.txt data/individuals.txt > data/train_indiv.txt
+grep -v -x -f "${out_dir}/data/test_indiv.txt" \
+  "${out_dir}/data/individuals.txt" > "${out_dir}/data/train_indiv.txt"
 
+#TODO: here the file name includes hamap3, but code doens't actually subset
+# to these variants. README says to do so, so I think I will add it?
 ## split the data into training and testing
-# test
+# train
 echo -e "\nSplitting the data\n"
 plink \
-  --bfile genotype/metsim_info03_n6136_rsid \
-  --keep data/train_indiv.txt \
+  --bfile "${plink_prefix}" \
+  --keep "${out_dir}/data/train_indiv.txt" \
   --make-bed \
-  --out data/train/metsim_train-hapmap3
+  --out "${out_dir}/data/train/train"
 
-# train
+# test
 plink \
-  --bfile genotype/metsim_info03_n6136_rsid \
-  --keep data/test_indiv.txt \
+  --bfile "$plink_prefix" \
+  --keep "${out_dir}/data/test_indiv.txt" \
   --make-bed \
-  --out data/test/metsim_test-hapmap3
+  --out "${out_dir}/data/test/test"
 
 
 ## generate other formats for the train set
@@ -36,63 +75,62 @@ plink \
 echo -e "\nCalculating a grm matrix\n"
 
 gcta \
---bfile data/train/metsim_train-hapmap3 \
---make-grm \
---thread-num 8 \
---out data/train/metsim_train-hapmap3_grm
+  --bfile "${out_dir}/data/train/train" \
+  --make-grm \
+  --thread-num 8 \
+  --out "${out_dir}/data/train/train_grm"
 
 ## Make a grm gz (for ridge)
 echo -e "\nCalculating a grm matrix (gz)\n"
 
 gcta \
---bfile data/train/metsim_train-hapmap3 \
---make-grm-gz \
---thread-num 8 \
---out data/train/metsim_train-hapmap3_grm
+  --bfile "${out_dir}/data/train/train" \
+  --make-grm-gz \
+  --thread-num 8 \
+  --out "${out_dir}/data/train/train_grm"
 
 
 ## Calculate pca
 echo -e "\nCalculating pcas\n"
 
 gcta \
---grm data/train/metsim_train-hapmap3_grm \
---pca 20 \
---thread-num 8 \
---out data/train/metsim_train-hapmap3_pca 
+  --grm "${out_dir}/data/train/train_grm" \
+  --pca 20 \
+  --thread-num 8 \
+  --out "${out_dir}/data/train/train_pca"
 
 echo -e "\nGenerate a pgen format\n"
 
 ## make pgen format (uses plink 2.0) for lasso
-module load plink/2.0
-
 plink2 \
---bfile data/train/metsim_train-hapmap3 \
---make-pgen vzs \
---out data/train/metsim_train-hapmap3_pgen
+  --bfile "${out_dir}/data/train/train" \
+  --make-pgen vzs \
+  --out "${out_dir}/data/train/train_pgen"
 
 # formating the psam to work 
-mv data/train/metsim_train-hapmap3_pgen.psam data/train/metsim_train-hapmap3_pgen.psam.bak
+mv "${out_dir}/data/train/train_pgen.psam" "${out_dir}/data/train/train_pgen.psam.bak"
 
-awk -F"\t" '{print $2"\t"$2"\t"$3}' data/train/metsim_train-hapmap3_pgen.psam.bak > data/train/metsim_train-hapmap3_pgen.psam
+awk -F"\t" '{print $2"\t"$2"\t"$3}' "${out_dir}/data/train/train_pgen.psam.bak" > \
+  "${out_dir}/data/train/train_pgen.psam"
 
 ## Dont use underscore in names, has a problem with gw_lasso
-sed -i  -e 's/^IID/#FID/' -e 's/_/-/g' data/train/metsim_train-hapmap3_pgen.psam
+#TODO: resolve this in PLINK command instead?
+sed -i  -e 's/^IID/#FID/' -e 's/_/-/g' data/train/train_pgen.psam
 
 
 ## make bgen for gw ridge prediction
-module load bgen/1.1.3
 
 plink2 \
---bfile data/test/metsim_test-hapmap3 \
---export bgen-1.3 \
---out data/test/metsim_test-hapmap3_bgen
+  --bfile "${out_dir}/data/test/test" \
+  --export bgen-1.3 \
+  --out "${out_dir}/data/test/test_bgen"
 
-bgenix -g data/test/metsim_test-hapmap3_bgen.bgen -index
+bgenix -g data/test/test_bgen.bgen -index
 
 ## make vcf for prediction to test the models
 plink2 \
---bfile data/test/metsim_test-hapmap3 \
---recode vcf-iid \
---out data/test/metsim_test-hapmap3
+  --bfile "${out_dir}/data/test/test" \
+  --recode vcf-iid \
+  --out "${out_dir}/data/test/test_vcf"
 
 echo -e "\nDONE!!"
