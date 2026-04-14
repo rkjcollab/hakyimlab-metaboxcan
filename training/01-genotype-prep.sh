@@ -16,24 +16,13 @@ while getopts ":p:o:" opt; do
   esac
 done
 
-
-#TODO: before this:
-  # do we need to clean genetic data (SNP & sample missingness?, HWE?)
-  # if add this step, could also add filter to HapMap3 SNPs only
-
-
-#TODO: for now, adding variable paths but keeping hardcoded file names to
+# TO NOTE: for now, added variable paths but keeping hardcoded file names to
 # enable ease of questions to Festus if needed.
+
 #TODO: maybe build plink file name into output folder, but keep files general?
 #TODO: add thread_num as variable
 
-#TODO: revisit how want to handle environment
-module load gcc/6.2.0
-module load bcftools
-module load plink/1.90
-module load plink/2.0
-module load gcta
-module load bgen/1.1.3
+##### TODO next!! convert to PLINK2!
 
 # Function to check file exists, use for commands that could fail silently
 check_file_exists() {
@@ -61,9 +50,6 @@ shuf --random-source=<(yes 149) "${out_dir}/data/individuals.txt" | \
 grep -v -x -f "${out_dir}/data/test_indiv.txt" \
   "${out_dir}/data/individuals.txt" > "${out_dir}/data/train_indiv.txt"
 
-#TODO: here the file name includes hamap3, but code doens't actually subset
-# to these variants. README says to do so, so I think I will add it?
-## split the data into training and testing
 # train
 echo -e "\nSplitting the data\n"
 plink \
@@ -78,7 +64,6 @@ plink \
   --keep "${out_dir}/data/test_indiv.txt" \
   --make-bed \
   --out "${out_dir}/data/test/test"
-
 
 ## generate other formats for the train set
 ## make a grm
@@ -127,15 +112,13 @@ awk -F"\t" '{print $2"\t"$2"\t"$3}' "${out_dir}/data/train/train_pgen.psam.bak" 
 #TODO: resolve this in PLINK command instead?
 sed -i  -e 's/^IID/#FID/' -e 's/_/-/g' "${out_dir}/data/train/train_pgen.psam"
 
-
 ## make bgen for gw ridge prediction
-
 plink2 \
   --bfile "${out_dir}/data/test/test" \
   --export bgen-1.3 \
   --out "${out_dir}/data/test/test_bgen"
 
-bgenix -g "${out_dir}/data/test/test_bgen.bgen -index
+bgenix -g "${out_dir}/data/test/test_bgen.bgen" -index
 
 ## make vcf for prediction to test the models
 plink2 \
