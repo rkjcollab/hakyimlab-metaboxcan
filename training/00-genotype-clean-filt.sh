@@ -3,7 +3,7 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 -p <plink_prefix> -o <out_dir>"
+  echo "Usage: $0 -r <repo_dir> -p <plink_prefix> -o <out_dir>"
   exit 1
 }
 
@@ -17,10 +17,6 @@ while getopts ":r:p:o:" opt; do
   esac
 done
 
-# TO NOTE: this script requires PLINK2 formatted file inputs, assumes that
-# input build is hg38, and assumes that given HapMap3 SNP list is hg19.
-input_build_num="38"
-list_build_num="19"
 #TODO: make list more generic name instead of using hapmap3?
 
 # Based on README, this script adds basic genetic data cleaning (SNP & sample
@@ -28,7 +24,12 @@ list_build_num="19"
 # SNPs at repo https://github.com/hakyimlab/Yanyus-misc-tools/tree/master/hapmap3_snps
 # with MAF = 0.01 and build b37 (hg19).
 
-# # Get HapMap SNP list if don't have already
+# TO NOTE: this script requires PLINK2 formatted file inputs, assumes that
+# input build is hg38, and assumes that given HapMap3 SNP list is hg19.
+input_build_num="38"
+list_build_num="19"
+
+# Get HapMap SNP list if don't have already
 if [ ! -f "${out_dir}/hapmap3_snps_maf0.01_hg19.tsv" ]; then
   wget -O "${out_dir}/hapmap3_snps_maf0.01_hg19.tsv.gz" \
     https://uchicago.box.com/shared/static/junrcgxwpuyck03r6gq88j9b18g18vf5
@@ -107,10 +108,10 @@ CrossMap bed "${repo_dir}/refs/hg${list_build_num}ToHg${input_build_num}.over.ch
   "${out_dir}/tmp_hapmap3_${list_build_num}.bed"  \
   "${out_dir}/hapmap3_${input_build_num}.bed"
 
-# Filter data to HapMap3 SNPs only
+# Filter data to HapMap3 SNPs only, force write out of FID (constant 0 if not present)
 plink2 --bfile "${out_dir}/gt_filt_miss_hwe" \
   --extract bed1 "${out_dir}/hapmap3_${input_build_num}.bed" \
-  --make-pfile --out "${out_dir}/gt_clean_hapmap3"
+  --make-pgen --out "${out_dir}/gt_clean_hapmap3"
 
 # Cleanup
 rm ${out_dir}/tmp_*
