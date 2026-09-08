@@ -7,29 +7,41 @@ usage() {
   exit 1
 }
 
-while getopts ":r:p:o:" opt; do
+while getopts ":r:p:b:o:" opt; do
   case "${opt}" in
     r) repo_dir=${OPTARG};;
     p) plink_prefix=${OPTARG};;
+    b) plink_prefix_build=${OPTARG};;
     o) out_dir=${OPTARG};;
     :) echo "Option -$OPTARG requires an argument." >&2; usage;;
     \?) echo "Invalid option: -$OPTARG" >&2; usage;;
   esac
 done
 
-#TODO: make list more generic name instead of using hapmap3?
+# Add path to top-level of local repository after -r, PLINK2 file prefix with
+# path after -p, PLINK2 file genome build (either "hg19" or "hg38") after -b,
+# and output directory path after -o.
 
 # Based on README, this script adds basic genetic data cleaning (SNP & sample
 # missingness, HWE), and then filters to HapMap3 SNPs only using the list of
 # SNPs at repo https://github.com/hakyimlab/Yanyus-misc-tools/tree/master/hapmap3_snps
 # with MAF = 0.01 and build b37 (hg19).
 
-# TO NOTE: this script requires PLINK2 formatted file inputs, assumes that
-# input build is hg38, and assumes that given HapMap3 SNP list is hg19.
-input_build_num="38"
-list_build_num="19"
+# TO NOTE: this script requires PLINK2 formatted file inputs.
+
+
+# If plink_prefix_build is not hg19 or hg38, then exit with error
+if [[ "${plink_prefix_build}" != "hg19" && "${plink_prefix_build}" != "hg38" ]]; then
+  echo "Error: plink_prefix_build must be either hg19 or hg38. Exiting."
+  exit 1
+fi
+input_build_num="${plink_prefix_build#hg}"
+
+# Make output dir if needed
+mkdir -p "${out_dir}"
 
 # Get HapMap SNP list if don't have already
+list_build_num="19"
 if [ ! -f "${out_dir}/hapmap3_snps_maf0.01_hg19.tsv" ]; then
   wget -O "${out_dir}/hapmap3_snps_maf0.01_hg19.tsv.gz" \
     https://uchicago.box.com/shared/static/junrcgxwpuyck03r6gq88j9b18g18vf5
@@ -103,10 +115,14 @@ NR==1 {
 }
 ' "${out_dir}/hapmap3_snps_maf0.01_hg19.tsv" > "${out_dir}/tmp_hapmap3_${list_build_num}.bed"
 
-# Liftover HapMap3 SNPs from hg19 to hg38
-CrossMap bed "${repo_dir}/refs/hg${list_build_num}ToHg${input_build_num}.over.chain" \
-  "${out_dir}/tmp_hapmap3_${list_build_num}.bed"  \
-  "${out_dir}/hapmap3_${input_build_num}.bed"
+# If input build is hg38, liftover HapMap3 SNPs from hg19 to hg38
+if [[ "${plink_prefix_build}" == "hg38" ]]; then
+  CrossMap bed "${repo_dir}/refs/hg19ToHg38.over.chain" \
+    "${out_dir}/tmp_hapmap3_${list_build_num}.bed"  \
+    "${out_dir}/hapmap3_${input_build_num}.bed"
+else
+  cp "${out_dir}/tmp_hapmap3_${list_build_num}.bed" "${out_dir}/hapmap3_${input_build_num}.bed"
+fi
 
 # Filter data to HapMap3 SNPs only, force write out of FID (constant 0 if not present)
 plink2 --bfile "${out_dir}/gt_filt_miss_hwe" \
