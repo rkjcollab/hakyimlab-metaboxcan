@@ -15,9 +15,6 @@ use.glmnetPlus: TRUE
 num.snps.batch: 200
 
 # path to plink2 program
-# on washington
-# plink2.path: "/vol/bmd/yanyul/softwares/plink2"
-# on CRI.
 # in the metaboxcan-training apptainer image (env/metaboxcan-training.def):
 plink2.path: '/opt/conda/envs/metaboxcan-training/bin/plink2'
 
