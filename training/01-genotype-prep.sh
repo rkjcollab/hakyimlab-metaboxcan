@@ -70,8 +70,7 @@ plink \
 ## make a grm
 echo -e "\nCalculating a grm matrix.\n"
 
-#TODO: temp change while testing!
-/usr/local/bin/gcta-1.95.3-macOS-arm64/bin/gcta64 \
+gcta64 \
   --bfile "${out_dir}/train/train" \
   --make-grm \
   --thread-num "${thread_num}" \
@@ -80,8 +79,7 @@ echo -e "\nCalculating a grm matrix.\n"
 ## Make a grm gz (for ridge)
 echo -e "\nCalculating a grm matrix (gz)\n"
 
-#TODO: temp change while testing!
-/usr/local/bin/gcta-1.95.3-macOS-arm64/bin/gcta64 \
+gcta64 \
   --bfile "${out_dir}/train/train" \
   --make-grm-gz \
   --thread-num "${thread_num}" \
@@ -90,8 +88,7 @@ echo -e "\nCalculating a grm matrix (gz)\n"
 ## Calculate pca
 echo -e "\nCalculating PCA.\n"
 
-#TODO: temp change while testing!
-/usr/local/bin/gcta-1.95.3-macOS-arm64/bin/gcta64 \
+gcta64 \
   --grm "${out_dir}/train/train_grm" \
   --pca 20 \
   --thread-num "${thread_num}" \
