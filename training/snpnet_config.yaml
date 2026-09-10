@@ -14,12 +14,14 @@ use.glmnetPlus: TRUE
 # SNP batch size (the number of SNPs to consider in batch)
 num.snps.batch: 200
 
-# path to plink2 program 
+# path to plink2 program
 # on washington
-# plink2.path: "/vol/bmd/yanyul/softwares/plink2" 
-# on CRI. 
-plink2.path: '/path/to/plink2'
+# plink2.path: "/vol/bmd/yanyul/softwares/plink2"
+# on CRI.
+# in the metaboxcan-training apptainer image (env/metaboxcan-training.def):
+plink2.path: '/opt/conda/envs/metaboxcan-training/bin/plink2'
 
 
 # path to zstdcat program
-zstdcat.path: "/path/to/zstdcat" 
+# in the metaboxcan-training apptainer image (env/metaboxcan-training.def):
+zstdcat.path: "/opt/conda/envs/metaboxcan-training/bin/zstdcat"
